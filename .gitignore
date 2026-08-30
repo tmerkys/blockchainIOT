@@ -4,3 +4,5 @@ venv/
 device/keystore/
 __pycache__/
 *.pyc
+contracts/out/
+contracts/cache/
