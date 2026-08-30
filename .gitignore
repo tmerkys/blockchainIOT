@@ -1,0 +1,6 @@
+contracts/lib/
+venv/
+.env
+device/keystore/
+__pycache__/
+*.pyc
