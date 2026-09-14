@@ -19,8 +19,11 @@ bleak==3.0.2
 
 # experiments/analyze.py — mean, stdev, 95% CI, plots
 pandas==3.0.5
-scipy==1.18.1
+scipy==1.17.1
 matplotlib==3.11.1
 
 # Test suite (shared/test_voucher.py, etc.)
 pytest==9.1.1
+# fastapi.testclient needs an HTTP client to drive the ASGI app
+# (gateway/test_api.py); it is not pulled in by fastapi itself.
+httpx==0.28.1
