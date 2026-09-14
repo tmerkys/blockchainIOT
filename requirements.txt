@@ -1,0 +1,26 @@
+# Pinned per CLAUDE.md "Stack" section. Target: Python 3.11.
+# Resolved and installed cleanly together as of 2026-08-30 (see conversation
+# history) — reinstall into a fresh venv and re-pin if you bump any of these.
+
+# Voucher schema + signing (shared/, device/, gateway/, merchant/)
+eth-account==0.14.0
+hexbytes==2.0.0
+pydantic==2.13.5
+
+# Chain RPC (gateway relayer: build tx, submit, await receipt)
+web3==7.16.0
+
+# Gateway HTTP API
+fastapi==0.141.1
+uvicorn==0.52.4
+
+# Bluetooth transport (device <-> gateway)
+bleak==3.0.2
+
+# experiments/analyze.py — mean, stdev, 95% CI, plots
+pandas==3.0.5
+scipy==1.18.1
+matplotlib==3.11.1
+
+# Test suite (shared/test_voucher.py, etc.)
+pytest==9.1.1
