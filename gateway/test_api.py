@@ -1,5 +1,6 @@
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -94,8 +95,9 @@ def test_valid_voucher_returns_a_relay_result(client):
     body = response.json()
 
     assert body["accepted"] is True
-    # Accepted but unsent: the calldata is built and PaymentChannel is not
-    # deployed yet (M1), which is not the device's fault and so not a 4xx.
+    # Accepted but unsent: this relayer has submission off, so the calldata is
+    # built and nothing is broadcast. Not the device's fault, so not a 4xx.
+    # scripts/e2e_m1.py exercises the submitting path against anvil.
     assert body["submitted"] is False
     assert body["txHash"] is None
     assert "not submitted" in body["reason"]
@@ -122,15 +124,30 @@ def test_response_carries_the_marks_one_csv_row_needs(client):
     assert body["t0"] == payload["t0"]
     assert body["t1"] == payload["t1"]
     assert body["t2"] is not None and body["t2"] >= payload["t1"]
-    # Not submitted yet, so the chain-side marks are still empty.
+    # Nothing was broadcast, so the chain-side marks are still empty.
     assert body["t3"] is body["t4"] is body["t5"] is None
 
 
 def test_a_voucher_without_a_merchant_signature_still_relays(client):
+    # Calldata-only mode will build a 2-of-3 payload; it is the submitting path
+    # that has to refuse it, since settle() is 3-of-3 (see below).
     body = client.post("/voucher", json=_payload(sigMerchant=None)).json()
 
     assert body["accepted"] is True
     assert body["merchant"] is None
+
+
+def test_a_voucher_without_a_merchant_signature_is_refused_before_gas(client):
+    # With submission on, a missing third signature is a guaranteed revert, so
+    # the gateway must reject it rather than pay to find out. H2 from the gas side.
+    client.app.state.relayer.config = replace(
+        client.app.state.relayer.config, submit=True
+    )
+
+    response = client.post("/voucher", json=_payload(sigMerchant=None))
+
+    assert response.status_code == 422
+    assert "3-of-3" in response.json()["reason"]
 
 
 # --- POST /voucher, rejections --------------------------------------------
@@ -206,6 +223,7 @@ def test_health_reports_the_configuration_a_run_depends_on(client, monkeypatch):
     # to pay on every test run.
     relayer = client.app.state.relayer
     monkeypatch.setattr(type(relayer.w3.eth), "chain_id", CHAIN_ID)
+    monkeypatch.setattr(type(relayer.w3.eth), "get_code", lambda self, address: b"")
 
     body = client.get("/health").json()
 
@@ -218,8 +236,10 @@ def test_health_reports_the_configuration_a_run_depends_on(client, monkeypatch):
     assert body["device"] == DEVICE.address
     assert body["merchant"] == MERCHANT.address
     assert body["canSign"] is True
-    # Nothing to submit to yet (M1) - health must not claim otherwise.
+    # health() probes eth_getCode for real; this app points at an address with
+    # no code behind it, and health must not claim otherwise.
     assert body["contractDeployed"] is False
+    assert body["submit"] is False
 
 
 if __name__ == "__main__":

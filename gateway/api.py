@@ -127,9 +127,9 @@ def create_app(relayer: Relayer | None = None) -> FastAPI:
     async def post_voucher(req: VoucherRequest, request: Request) -> RelayResult:
         """Verify a signed voucher and build its settlement transaction.
 
-        Returns 200 with `submitted=false` while the contract is undeployed:
-        the voucher was accepted and the calldata built, there is just nothing
-        to send it to yet. 422 means the voucher itself is bad.
+        Returns 200 with `submitted=false` when the gateway is in calldata-only
+        mode (`GATEWAY_SUBMIT` off): the voucher was accepted and the calldata
+        built, nothing was broadcast. 422 means the voucher itself is bad.
         """
         relayer: Relayer = request.app.state.relayer
         return relayer.relay(
@@ -152,7 +152,13 @@ def create_app(relayer: Relayer | None = None) -> FastAPI:
         """
         relayer: Relayer = request.app.state.relayer
         facts = relayer.health()
-        ready = facts["canSign"] and facts["rpcReachable"] and facts["chainIdMatches"]
+        ready = (
+            facts["canSign"]
+            and facts["rpcReachable"]
+            and facts["chainIdMatches"]
+            # Submission needs something to submit to; calldata-only mode does not.
+            and (facts["contractDeployed"] or not facts["submit"])
+        )
         return {
             "status": "ok" if ready else "degraded",
             "time": time.time(),
