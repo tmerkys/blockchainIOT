@@ -376,3 +376,79 @@ This contradicts the expectation that implementing `close()` would recover it. I
 not, and no future milestone will — the ETH is gone for practical purposes. The lesson
 for the thesis write-up is a real one about upgradeability: an escrow contract with no
 exit path strands whatever is in it the moment its logic needs to change.
+
+## M6 — security (H2): abuse suite + live attack (2026-09-20)
+- Commit: (this commit)
+- Foundry: 55 tests, 5 suites, 0 failed. `forge test` on commit below.
+- Live: Base Sepolia, contract `0xb746530c7e38aB163dE7238f70FE1e91c5E14bF9`,
+  channel `0x387109a3C241D0722F96BB9ac8eefDa1aB3beDbb`.
+
+### CLAUDE.md M6 checklist — coverage map
+Audit first: M4's 13 `close()` tests covered **none** of the seven required cases for
+`settle()` — they exercise the analogous cases on the exit path only, and
+`test_closingOneChannelLeavesAnotherIntact` is escrow isolation, not signature replay.
+All seven were written fresh.
+
+| # | Required case | Test | Reverts with |
+|---|---|---|---|
+| 1 | Gateway-only signature | `GatewayAbuse::test_gatewayOnlySignatureReverts` | `bad device sig` |
+| 2 | Forged device signature | `GatewayAbuse::test_forgedDeviceSignatureReverts` | `bad device sig` |
+| 3 | Replayed voucher | `Replay::test_replayingTheSameVoucherReverts` | `not monotonic` |
+| 4 | Non-monotonic amount | `GatewayAbuse::test_nonMonotonicAmountReverts` | `not monotonic` |
+| 5 | Expired deadline | `GatewayAbuse::test_expiredDeadlineReverts` | `expired` |
+| 6 | Voucher from another channel | `Replay::test_voucherFromAnotherChannelReverts` | `bad device sig` |
+| 7 | Voucher from another chainId | `Replay::test_voucherSignedForAnotherChainIdReverts` | `bad device sig` |
+
+Cases 6 and 7 are the EIP-712 domain doing its job: `channel` sits inside the signed
+struct and `chainId`/`verifyingContract` inside the domain separator, so re-aiming a
+voucher invalidates every signature over it. Both have a matching **positive control**
+(`test_theSameVoucherIsValidForItsOwnChannel`, `test_theSameVoucherUnderThisChainIdSettles`)
+so the reverts cannot be explained by the contract simply rejecting everything.
+
+### Live attack (CLAUDE.md: "a live attempt from the running gateway")
+`scripts/h2_live.py`. Two halves, because they answer different questions.
+
+**Through the live gateway API** — what an honest gateway does. 3/3 refused, no
+transaction: empty device signature (HTTP 422, `signature must be 65 bytes, got 0`),
+gateway's own signature in the device slot (422, `bad device sig: signer is not the
+channel's device`), 65 junk bytes (422, `signature is not recoverable`).
+
+This proves little on its own and is reported as such: in the H2 threat model the
+gateway *is* the adversary, and an adversary deletes its own checks.
+
+**The gateway attacking the contract** — the question that matters. The script holds
+the gateway key and nothing more, builds calldata through the gateway's production
+path (`Relayer.build_settle_tx`), forges the device slot with its own key, and steps
+over every off-chain guard including `estimate_gas`:
+
+```
+estimate_gas refused: execution reverted: bad device sig
+  -> overriding the gas limit and submitting anyway.
+forced tx      0x41b2dd32bee1ee17348f59f88ccb2d50ca7cb1b1ee1aceb21dead94af493bffa
+mined in block 47070886, status 0, gasUsed 39,388
+```
+
+Mined and **reverted on-chain**: `status = 0`, revert reason `bad device sig`. Escrow
+100,000,000,000 wei before and after; merchant balance 11,567,182,200,000 wei before
+and after; channel `paid` still 0. The attack cost the gateway 236,328,000,000 wei in
+burnt gas and bought nothing.
+
+**4/4 live attacks blocked.** This is the H2 evidence: the boundary is enforced by the
+chain, not by the gateway's good manners.
+
+### Incidental finding: channel IDs are not unique across deployments
+`open()` derives the id as `keccak256(device, gateway, merchant, _channelIndex)` — no
+contract address, no chainId. Two deployments with the same participant triple
+therefore mint **identical channel ids**. Observed live: channel
+`0x387109a3C241D0722F96BB9ac8eefDa1aB3beDbb` exists on *both* the M3 contract
+(`0xd0D2D168…`, deposit 100,000,000,000,000 wei, paid 3,790,360,000,000) and the M4
+contract (`0xb746530c…`, deposit 100,000,000,000 wei, paid 0).
+
+Not a vulnerability — storage is per-contract and the EIP-712 domain binds
+`verifyingContract`, which `Replay::test_voucherSignedForAnotherDeploymentReverts`
+demonstrates. But it has a direct consequence for M5: **the unique key for a run is
+(contract, channel), not channel alone.** Keying the CSV on channel would silently
+merge rows from two deployments.
+
+### Full `forge test` output for ch. 4
+See the table below; regenerate with `forge test -vv` from `contracts/`.
