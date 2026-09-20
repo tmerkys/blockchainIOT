@@ -243,8 +243,26 @@ def main(argv: list[str] | None = None) -> int:
             "  Re-run scripts/m2_setup.py on the laptop with this Pi's address."
         )
 
+    state = transport.channel_state(config.channel)
+    if not state.get("exists"):
+        raise SystemExit(
+            f"  channel {config.channel} does not exist on chain {config.chain_id}.\n"
+            "  Re-run scripts/m2_setup.py on the laptop."
+        )
+    if state["device"] != account.address:
+        raise SystemExit(
+            f"  channel's device is {state['device']}, this Pi is {account.address}"
+        )
+    print(
+        f"  channel state    paid {int(state['paid']):,} wei, nonce {state['nonce']}, "
+        f"deposit {int(state['deposit']):,} wei"
+    )
+
     print("\n=== 3. one tick ==================================================")
     agent = DeviceAgent(account=account, config=config, transport=transport)
+    # Resume from what the chain has already settled, so this voucher is
+    # monotonic even though the meter session restarts at zero.
+    agent.resume_from(paid=int(state["paid"]), nonce=int(state["nonce"]))
     meter = KwhMeter(power_kw=args.power_kw, tick_seconds=args.tick_seconds, seed=args.seed)
     session = meter.start_session(args.session)
 

@@ -82,7 +82,21 @@ SETTLE_ABI: list[dict[str, Any]] = [
             {"name": "sigGateway", "type": "bytes"},
             {"name": "sigMerchant", "type": "bytes"},
         ],
-    }
+    },
+    {
+        "type": "function",
+        "name": "channels",
+        "stateMutability": "view",
+        "inputs": [{"name": "", "type": "address"}],
+        "outputs": [
+            {"name": "device", "type": "address"},
+            {"name": "gateway", "type": "address"},
+            {"name": "merchant", "type": "address"},
+            {"name": "deposit", "type": "uint256"},
+            {"name": "paid", "type": "uint256"},
+            {"name": "nonce", "type": "uint256"},
+        ],
+    },
 ]
 
 
@@ -562,6 +576,42 @@ class Relayer:
             t2=t2,
         )
         return self._submit(tx, result)
+
+    # --- channel state ------------------------------------------------------
+
+    def channel_state(self, channel: str) -> dict[str, Any]:
+        """Read one channel's on-chain state, for the device to resume from.
+
+        The device holds no RPC connection — that is the architecture, not an
+        oversight — so it cannot see how much of its channel has already been
+        settled. Without this it restarts every session believing nothing has
+        been paid, and the second voucher it ever sends is non-monotonic and
+        rejected. That is invisible on a channel settled once and fatal to
+        M5's N>=30 runs, which settle the same channel repeatedly.
+
+        The contract stays the single source of truth for `paid` and `nonce`;
+        this only relays what it says.
+        """
+        address = to_checksum_address(channel)
+        try:
+            device, gateway, merchant, deposit, paid, nonce = self._contract.functions.channels(
+                address
+            ).call()
+        except Exception as exc:
+            raise RelayerNotReady(f"could not read channel {address}: {exc}") from exc
+
+        return {
+            "channel": address,
+            # The zero device address is how the contract spells "no such
+            # channel"; `settle()` rejects it with "unknown channel".
+            "exists": device != ZERO_ADDRESS,
+            "device": device,
+            "gateway": gateway,
+            "merchant": merchant,
+            "deposit": deposit,
+            "paid": paid,
+            "nonce": nonce,
+        }
 
     # --- health -------------------------------------------------------------
 

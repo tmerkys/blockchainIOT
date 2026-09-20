@@ -148,6 +148,18 @@ def create_app(relayer: Relayer | None = None) -> FastAPI:
         result.t6 = time.time()
         return result
 
+    @app.get("/channel/{channel}")
+    async def channel(channel: str, request: Request) -> dict[str, Any]:
+        """On-chain state of one channel, so the device can resume from it.
+
+        The device has no RPC of its own and must not grow one: it signs and
+        transmits, and the gateway is its only window onto the chain. What it
+        needs from that window is exactly `paid` and `nonce` — the two values
+        that decide whether its next voucher is monotonic.
+        """
+        relayer: Relayer = request.app.state.relayer
+        return relayer.channel_state(channel)
+
     @app.get("/health")
     async def health(request: Request) -> dict[str, Any]:
         """Liveness plus the config the run depends on.

@@ -274,6 +274,20 @@ class HttpTransport:
         self.last_response = payload
         return payload
 
+    def channel_state(self, channel: str) -> dict[str, Any]:
+        """Ask the gateway what the chain says about `channel`.
+
+        The device's only window onto chain state, and deliberately a narrow
+        one: it reads `paid` and `nonce` so its next voucher is monotonic, and
+        holds no RPC connection of its own.
+        """
+        try:
+            response = self.session.get(f"{self.url}/channel/{channel}", timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as exc:
+            raise GatewayError(f"could not read channel {channel}: {exc}") from exc
+
     def health(self) -> dict[str, Any]:
         """`GET /health`. Call it before a run, not during one."""
         try:
