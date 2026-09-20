@@ -31,6 +31,7 @@ import argparse
 import json
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -41,11 +42,14 @@ if str(REPO_ROOT) not in sys.path:
 from eth_account import Account  # noqa: E402
 from hexbytes import HexBytes  # noqa: E402
 from web3 import Web3  # noqa: E402
+from web3.exceptions import Web3RPCError  # noqa: E402
 from web3.logs import DISCARD  # noqa: E402
 
 from scripts.e2e_m1 import ARTIFACT, ENV_FILE, load_env, require  # noqa: E402
 
 DEPLOY_TIMEOUT_S = 120
+NONCE_RETRIES = 3
+NONCE_BACKOFF_S = 3.0
 
 
 def load_artifact() -> tuple[list[dict[str, Any]], str]:
@@ -71,17 +75,37 @@ def send(w3: Web3, account: Any, call: Any, what: str, value: int = 0) -> dict[s
     `from` goes in before `build_transaction`, not after: web3 estimates gas
     while building, and an estimate with no sender runs as the zero address,
     which holds no ETH and fails any call carrying `value`.
+
+    The nonce is read from the *pending* block and the send is retried on
+    "nonce too low". A public endpoint like Base Sepolia is a load-balanced
+    pool, and the node answering `eth_getTransactionCount` is often not the
+    one that just accepted the previous transaction — so holding a receipt is
+    no guarantee the next nonce lookup has caught up. Against a local anvil
+    this never happens, which is exactly why it was not already handled.
     """
-    tx = call.build_transaction(
-        {
-            "from": account.address,
-            "value": value,
-            "nonce": w3.eth.get_transaction_count(account.address),
-            "chainId": w3.eth.chain_id,
-        }
-    )
-    signed = account.sign_transaction(tx)
-    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+    last: Exception | None = None
+    for attempt in range(NONCE_RETRIES):
+        tx = call.build_transaction(
+            {
+                "from": account.address,
+                "value": value,
+                "nonce": w3.eth.get_transaction_count(account.address, "pending"),
+                "chainId": w3.eth.chain_id,
+            }
+        )
+        signed = account.sign_transaction(tx)
+        try:
+            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+            break
+        except Web3RPCError as exc:
+            if "nonce" not in str(exc).lower() or attempt == NONCE_RETRIES - 1:
+                raise
+            last = exc
+            print(f"  {what}: {exc}; refetching nonce (attempt {attempt + 2})")
+            time.sleep(NONCE_BACKOFF_S)
+    else:  # pragma: no cover - the loop always breaks or raises
+        raise SystemExit(f"{what}: could not settle on a nonce: {last}")
+
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=DEPLOY_TIMEOUT_S)
     if receipt["status"] != 1:
         raise SystemExit(f"{what} reverted: {HexBytes(tx_hash).to_0x_hex()}")
@@ -162,6 +186,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--deposit-eth", type=float, default=1.0, help="channel deposit")
     parser.add_argument(
+        "--contract",
+        default=None,
+        help="reuse an already-deployed PaymentChannel instead of deploying a new one",
+    )
+    parser.add_argument(
         "--gateway-host",
         default="0.0.0.0",
         help="interface uvicorn binds to; 0.0.0.0 is what lets the Pi reach it",
@@ -204,8 +233,18 @@ def main(argv: list[str] | None = None) -> int:
 
     abi, bytecode = load_artifact()
 
-    print("\n=== 2. deploy PaymentChannel =====================================")
-    contract = deploy(w3, funder, abi, bytecode)
+    print("\n=== 2. PaymentChannel ============================================")
+    if args.contract:
+        # Reuse rather than redeploy. On a public testnet the faucet budget is
+        # finite and a deploy is by far the most expensive transaction here, so
+        # a failure *after* the deploy must not force paying for it twice.
+        address = w3.to_checksum_address(args.contract)
+        if not w3.eth.get_code(address):
+            raise SystemExit(f"no contract code at {address} on chain {observed}")
+        contract = w3.eth.contract(address=address, abi=abi)
+        print(f"  reusing deployment at {address}")
+    else:
+        contract = deploy(w3, funder, abi, bytecode)
 
     print("\n=== 3. open the Pi's channel =====================================")
     channel = open_channel(
@@ -240,7 +279,11 @@ def main(argv: list[str] | None = None) -> int:
     print("    DEVICE_KEYSTORE=/home/merkys/magis/device/keystore/device.json")
     print("    DEVICE_KEYSTORE_PASSWORD=<the passphrase you chose on the Pi>")
     print(f"    GATEWAY_URL=http://<laptop-ip>:{port}")
-    print(f"    MERCHANT_PRIVATE_KEY={merchant_key}")
+    # Deliberately not echoed. This was harmless while every key in .env was an
+    # anvil dev key, and stopped being harmless the moment the same line ran
+    # against a public testnet: printed secrets end up in scrollback, CI logs
+    # and pasted transcripts, and a "testnet-only" key is still a key.
+    print("    MERCHANT_PRIVATE_KEY=<copy from the gateway's .env; not printed here>")
     print("\n  Then, on the Pi:  ./venv/bin/python device/run_tick.py")
     return 0
 
