@@ -149,12 +149,31 @@ def report(result: dict[str, Any], signed: Any, marks: DeviceMarks) -> None:
         print("  Not subtracted from anything above. Log it in docs/measurements.md.")
 
     print("\n--- cost ---------------------------------------------------------")
-    gas_used, price, l1_fee = result.get("gasUsed"), result.get("effectiveGasPrice"), result.get("l1Fee")
+    gas_used = result.get("gasUsed")
+    price = result.get("effectiveGasPrice")
+    l1_fee, l1_gas, l1_price = (result.get(k) for k in ("l1Fee", "l1GasUsed", "l1GasPrice"))
+
     print(f"  gasUsed             {gas_used:,}" if gas_used else "  gasUsed             --")
     print(f"  effectiveGasPrice   {price:,} wei" if price else "  effectiveGasPrice   --")
-    if gas_used and price:
-        print(f"  execution fee       {gas_used * price} wei")
-    print(f"  l1Fee               {l1_fee:,} wei" if l1_fee else "  l1Fee               n/a (not an OP-stack chain)")
+    l2_fee = gas_used * price if gas_used and price else None
+    if l2_fee is not None:
+        print(f"  L2 execution fee    {l2_fee:,} wei")
+
+    if l1_fee is None:
+        print("  l1Fee               n/a (not an OP-stack chain)")
+    else:
+        # On Base this is often the larger half of the bill. Reporting the L2
+        # fee alone is the understatement CLAUDE.md warns about, so the total
+        # is spelled out here rather than left to be added up later.
+        print(f"  l1Fee (data avail.) {l1_fee:,} wei")
+        if l1_gas is not None and l1_price is not None:
+            print(f"    from              {l1_gas:,} L1 gas @ {l1_price:,} wei")
+        if l2_fee is not None:
+            total = l2_fee + l1_fee
+            share = 100 * l1_fee / total if total else 0
+            print(f"  TOTAL fee           {total:,} wei  ({share:.0f}% of it L1 data)")
+    print("  Gas units are the reproducible figure; EUR only against one pinned")
+    print("  ETH price on one stated date (CLAUDE.md, Instrumentation).")
 
     print("\n--- settlement ---------------------------------------------------")
     print(f"  tx               {result.get('txHash')}")

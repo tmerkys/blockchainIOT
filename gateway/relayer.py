@@ -86,6 +86,26 @@ SETTLE_ABI: list[dict[str, Any]] = [
 ]
 
 
+def receipt_int(value: Any) -> int | None:
+    """Coerce a receipt field to int, whatever shape the node sent it in.
+
+    web3 normalises the receipt fields it knows about, but OP-stack extras like
+    `l1Fee` are not in its schema and arrive as raw hex strings ("0x0"). A bare
+    `int()` on those raises, and it would raise *after* the transaction was
+    already mined — turning a successful settlement into a crashed run and a
+    missing row. Returns None for a genuinely absent field, which must stay
+    distinct from a zero fee.
+    """
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        return int.from_bytes(value, "big")
+    text = str(value).strip()
+    return int(text, 16) if text.lower().startswith("0x") else int(text)
+
+
 class VoucherRejected(Exception):
     """Voucher failed a pre-submission check - the gateway will not pay gas for it.
 
@@ -224,6 +244,8 @@ class RelayResult(BaseModel):
     gasUsed: int | None = None
     effectiveGasPrice: int | None = None
     l1Fee: int | None = None
+    l1GasUsed: int | None = None
+    l1GasPrice: int | None = None
 
     # Instrumentation marks. t0/t1 are the device's clock, t2-t5 the gateway's;
     # read the clock-skew warning in CLAUDE.md before subtracting across that line.
@@ -467,13 +489,15 @@ class Relayer:
         receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=RECEIPT_TIMEOUT_S)
         result.t4 = time.time()
 
-        result.blockNumber = receipt["blockNumber"]
-        result.gasUsed = receipt["gasUsed"]
-        effective = receipt.get("effectiveGasPrice")
-        result.effectiveGasPrice = int(effective) if effective is not None else None
-        # OP-stack only (Base): the L1 data-availability fee. Absent elsewhere.
-        l1_fee = receipt.get("l1Fee")
-        result.l1Fee = int(l1_fee) if l1_fee is not None else None
+        result.blockNumber = receipt_int(receipt["blockNumber"])
+        result.gasUsed = receipt_int(receipt["gasUsed"])
+        result.effectiveGasPrice = receipt_int(receipt.get("effectiveGasPrice"))
+        # OP-stack only (Base): the L1 data-availability fee, and the L1 gas and
+        # price it is computed from. On Base this is most of the real cost — the
+        # understatement CLAUDE.md warns about — and it arrives as a hex string.
+        result.l1Fee = receipt_int(receipt.get("l1Fee"))
+        result.l1GasUsed = receipt_int(receipt.get("l1GasUsed"))
+        result.l1GasPrice = receipt_int(receipt.get("l1GasPrice"))
 
         if receipt["status"] != 1:
             # estimate_gas passed and it still reverted - state moved underneath
