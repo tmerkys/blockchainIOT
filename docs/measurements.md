@@ -158,3 +158,107 @@ N=1. Instrumentation and topology proof on a real L2, not an H1 measurement. Tic
 numbers are not usable — they were taken before the confirmation-wait correction in bb61aea and
 reported 3898.7 ms end-to-end with a nonsensical 2010 ms "network" term; its *cost* figures are
 valid and are the first-settle column above. Tick 2 is the reference row.
+
+## M3 cleanup — merchant key rotated, dedicated-ish RPC, chrony (2026-09-20)
+
+Closing the three open items from the M3 row before M4. Not a new measurement
+condition: same topology, same commit lineage, one tick run to verify the
+changes took effect.
+
+### 1. Merchant key rotated (burned key retired)
+`scripts/m2_setup.py` printed the merchant private key to a terminal before that
+line was removed, so the key is treated as compromised regardless of its value.
+
+- burned: `0xE02981BB6C254CABFf6614c8d9Ea9D8F2dD91910`
+- active: `0xc154F645c9f7308C5D5533Da97c97e615BA99C04`
+
+**No redeploy was needed.** `PaymentChannel.open()` takes the merchant as an
+argument and stores it per channel, so the signer is channel-scoped, not
+contract-scoped — a new channel on the same contract carries the new merchant.
+The contract at `0xd0D2D1680c17F1F11d246A80fc1E034c3d067766` is unchanged, which
+also keeps the M3 explorer links valid.
+
+| | old channel `0x0d8a46e9…70EC02` | new channel `0x387109a3…3beDbb` |
+|---|---|---|
+| merchant | burned key | rotated key |
+| deposit | 200,000,000,000,000 wei | 100,000,000,000,000 wei |
+| paid / nonce | 7,923,020,000,000 / 2 | 3,790,360,000,000 / 1 |
+| status | retired, not used | **active** |
+
+The burned key is kept in `.env` as `RETIRED_MERCHANT_PRIVATE_KEY_BURNED` rather
+than deleted: it holds 7,923,020,000,000 wei of already-settled value, and it is
+the record of which key countersigned the two M3 vouchers. It is not referenced
+by any running component, and does not appear in any tracked file.
+
+**192,076,980,000,000 wei is locked in the retired channel** (deposit minus paid).
+Not lost — `close()` in M4 can refund it — but unavailable until then.
+
+### 2. RPC: public pool → publicnode
+The M3 row showed `t3-t2` = 1135 ms of gateway↔RPC round trips, not chain time.
+Benchmarked the candidates on the four read calls the relayer makes before it can
+broadcast, **with connection reuse** (web3's HTTPProvider keeps a `requests.Session`;
+benchmarking with a fresh TLS handshake per call overstates cost ~2x and would have
+picked a different winner):
+
+| endpoint | median, 4 calls | per call |
+|---|---|---|
+| `sepolia.base.org` (was) | 679 ms | 169.8 ms |
+| **`base-sepolia-rpc.publicnode.com`** (now) | **328 ms** | **82.0 ms** |
+| `base-sepolia.drpc.org` | 1687 ms | 421.9 ms |
+
+Effect on a real tick:
+
+| span | M3 (`sepolia.base.org`) | after (`publicnode`) |
+|---|---|---|
+| gateway build + broadcast `t3-t2` | 1135.2 ms | **670.4 ms** |
+| confirmation `t5-t4` | 1288.2 ms | **68.8 ms** |
+| network + framing | 6.3 ms | 7.4 ms |
+| signing `t1-t0` | 15.1 ms | 15.0 ms |
+
+`t3-t2` fell 41%, and the confirmation wait collapsed 19x — that span was almost
+entirely RPC-pool lag (`eth_blockNumber` answered by a node that had not yet seen
+our block), which is exactly what the M3 row predicted.
+
+**The reported `t4-t0` went 1337.9 → 1475.2 ms, which is not a regression.**
+`t4-t3` (L2 inclusion) was 167.8 ms then and 769.2 ms now: the tick landed at a
+different point in Base's 2 s block period. With N=1 that term is a uniform draw
+over ~0–2 s and swamps a 465 ms improvement elsewhere. This is the same
+block-cadence lottery flagged in the M1/M2 rows, and it is why only the
+*component* spans are comparable at N=1.
+
+**This is not yet a dedicated endpoint.** publicnode is still a shared pool, just
+a faster one. A keyed Alchemy/Infura endpoint needs an account signup (captcha),
+so it remains open; expect `t3-t2` to fall further when one is in place.
+
+### 3. chrony
+- **Pi:** chrony installed, active, enabled at boot, `systemd-timesyncd` yielded.
+  Pinned via `/etc/chrony/conf.d/magis.conf` to `time.cloudflare.com` (anycast,
+  reachable by name from both machines) with `0.europe.pool.ntp.org` as backup.
+  Tracking: stratum 4, system time 0.68 ms slow, RMS offset 2.5 ms.
+- **Laptop:** still `time.windows.com` — `w32tm /config` needs an elevated shell
+  and this session is not elevated. Measured against the Pi's source anyway:
+  `w32tm /stripchart /computer:time.cloudflare.com` gives −0.07, +0.41, −0.78,
+  +1.60 ms over four samples, i.e. **already sub-2 ms from the Pi's reference**.
+
+Application-level offset (gateway − device), from the paired (t_send,t2,t6,t4_dev)
+estimator: **−4.5 ms (M2) → −9.0 ms (M3) → +2.7 ms (now)**. The drift is arrested.
+Still a diagnostic only — no reported number is a cross-machine difference.
+
+### Verification tick
+`0x2c84e428ee8fb2e77aff8becad4b9a40d177e69b40d61dc364bcfbda4a37c731`, block
+47069959, channel `0x387109a3…3beDbb`, nonce 1, gasUsed **134,229**.
+
+That gas figure independently confirms the cold-slot finding in the M3 row: this
+is a *first* settlement on a fresh channel and costs 134,229, against 134,217 for
+the previous channel's first settlement and 75,029 for a subsequent one.
+
+### Budget before M4
+Gateway holds **185,540,217,548,292 wei** (~0.000186 ETH); a further ~288,286,620,000,000
+wei sits locked across the two channels until `close()` lands.
+
+**M4 as specified does not fit this budget.** 200 ticks at the current
+`PRICE_WEI_PER_KWH` (140,000,000,000,000 wei/kWh, ~3.8e12 wei/tick) accumulate to
+~7.6e14 wei, which exceeds both the gateway balance and any deposit it could fund.
+Options, in order of preference: lower `PRICE_WEI_PER_KWH` for the M4 run (gas is
+the reproducible figure; the EUR price is nominal anyway), shorten the tick, or
+top up from the faucet. Needs a decision before M4 starts.
