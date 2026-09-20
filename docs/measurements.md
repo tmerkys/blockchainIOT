@@ -262,3 +262,117 @@ wei sits locked across the two channels until `close()` lands.
 Options, in order of preference: lower `PRICE_WEI_PER_KWH` for the M4 run (gas is
 the reproducible figure; the EUR price is nominal anyway), shorten the tick, or
 top up from the faucet. Needs a decision before M4 starts.
+
+## M4 — the channel: 200 ticks, one on-chain settlement (Base Sepolia)
+- Date: 2026-09-20
+- Chain: Base Sepolia, chainId 84532, RPC `https://base-sepolia-rpc.publicnode.com`
+- Commit: 70a41de (both machines)
+- Contract (**redeployed** — `close()` and the `funder`/`closed` fields are new):
+  [`0xb746530c7e38aB163dE7238f70FE1e91c5E14bF9`](https://sepolia.basescan.org/address/0xb746530c7e38aB163dE7238f70FE1e91c5E14bF9)
+- Channel `0x8800F104092fAA7f5A0F0DF6aa47671Dad264685`, deposit 10,000,000,000,000 wei
+- Sensor ticks originated on the Pi, as since M2. Meter seed 4, 50 kW, 2 s ticks.
+
+### The result: 104.5x, 2.02 orders of magnitude
+| | gas per micropayment |
+|---|---|
+| per-tick `settle()` (M3 steady state) | 75,029 |
+| channel: `close()` / 200 | **718.0** |
+| **reduction** | **104.5x (2.02 orders of magnitude)** |
+
+**CLAUDE.md's M4 bar — "~2 orders of magnitude" — is met on the marginal figure.**
+
+Including one-time channel setup, which is the fuller lifecycle question:
+
+| | gas per micropayment |
+|---|---|
+| baseline: (open + 200 x settle) / 200 | 75,864.3 |
+| channel: (open + close) / 200 | 1,553.3 |
+| reduction | 48.8x (1.69 orders of magnitude) |
+
+Both are reported because they answer different questions. The 104.5x is the
+*marginal* cost of one more micropayment inside an open channel, which is what the
+micropayment claim is actually about. The 48.8x amortises `open()` (167,067 gas)
+over exactly 200 ticks; that term shrinks as a channel is used longer, so 48.8x is
+a floor set by this run's length, not a property of the design. At 600 ticks the
+same channel would show ~93x; the marginal figure does not move.
+
+### Transactions
+| step | tx | gasUsed |
+|---|---|---|
+| deploy (with `close()`) | [`0x4b41fc5d…7eac5e`](https://sepolia.basescan.org/tx/0x4b41fc5d9b09f867ff1ba0aa7d8a1b2d88ef8a8bb7aeea06cd01d771207eac5e) | 2,037,870 |
+| `open()` | [`0x8bdeb59a…10d2ca6`](https://sepolia.basescan.org/tx/0x8bdeb59a938f36fce31221ee7d7c321714913ba2db05d9229654aa10c10d2ca6) | 167,067 |
+| **`close()` — the only settlement** | [`0x7d4884a0…1a3e6dde`](https://sepolia.basescan.org/tx/0x7d4884a0d99aa7cbe67ee451b20347b451426ee6f1634cbc6b0b8ee81a3e6dde) | **143,590** |
+
+`close()` emitted both `Settled(nonce=200, cumulative=7,776,822,200,000, delta=same)`
+and `ChannelClosed(paidTotal=7,776,822,200,000, refunded=2,223,177,800,000)`.
+Those sum to exactly the 10,000,000,000,000 wei deposit, and the contract's balance
+for this channel is 0 — the escrow is conserved and fully drained.
+
+`close()` (143,590) costs more than a subsequent `settle()` (75,029) and about the
+same as a first settlement (134,229): it does the same cold-slot writes plus a second
+value transfer for the refund. That is the number the amortisation divides, so the
+comparison above is not flattered by using a cheaper transaction.
+
+### Off-chain accumulation (the cost that moved, not vanished)
+- 200 vouchers signed on the Pi, **0 on-chain transactions**
+- total signing 2639.4 ms; mean 13.2 ms/tick, median 13.2 ms, slowest 14.8 ms
+- wall time 2.65 s (not realtime-paced; see below)
+
+"The micropayment became free" is only true on chain. Each tick still costs the Pi
+~13.2 ms of CPU to sign — this is the term M7 must measure in joules, and the honest
+claim is that per-micropayment cost moved off the chain and onto the device, where it
+is ~5 orders of magnitude cheaper but not zero.
+
+### Scaled price for this run — and why it changes nothing measured
+`PRICE_WEI_PER_KWH` was set to **1,400,000,000,000 wei/kWh on the Pi for this run,
+100x below the nominal 140,000,000,000,000** (0.35 EUR/kWh at 2500 EUR/ETH).
+
+Purely a budget accommodation: 200 ticks at the nominal price accumulate ~7.8e14 wei
+(~0.00078 ETH), more than the faucet-funded gateway holds, so no deposit it could fund
+would cover the final voucher. At the scaled price the same 200 ticks accumulate
+7,776,822,200,000 wei inside a 10,000,000,000,000 wei deposit.
+
+**This does not touch what M4 measures.** Gas is a function of the calldata and the
+storage writes, not of the amount transferred: `close()` costs 143,590 gas whether it
+moves 7.8e12 or 7.8e14 wei. The gas column, the amortisation ratio and the 104.5x are
+all identical at the nominal price. It is *not* a change to the protocol's economics
+and the nominal price remains the default in `device/agent.py`.
+
+### close() and H2
+Closing is no weaker than spending: `close()` carries the same 3-of-3 signature
+requirement as `settle()`, and the two share `_applyVoucher()` so a check can never
+guard one and not the other. The refund goes to the recorded `funder`, never to
+`msg.sender` — the gateway submits this transaction and pays its gas, and gains
+nothing by doing so. Covered by 13 Foundry tests in `contracts/test/Close.t.sol`,
+including a forged device signature, a wrong merchant signature, double-close,
+settle-after-close, and closing one channel leaving another's escrow untouched.
+
+**Stated limitation:** cooperative close only. There is no unilateral close with a
+challenge window, so a counterparty who simply stops signing strands the funder's
+remaining deposit. Production channels answer this with a challenge period during
+which a higher-nonce voucher overrides a stale one. Out of scope for CLAUDE.md's M4
+(open / accumulate / close) and documented in `PaymentChannel.sol` itself.
+
+### Pacing
+Ticks ran flat out (2.65 s) rather than paced at 2 s each (~6.7 min). `--realtime`
+does the latter. Pacing changes neither the energy series (the meter integrates
+`tick_seconds`, not wall time) nor any gas figure; it would only matter for a
+wall-clock-duration claim, which M4 does not make.
+
+### Budget after M4
+Gateway holds **163,391,004,341,322 wei** (~0.000163 ETH). This run cost ~22.1e12 wei
+of which 2,223,177,800,000 wei came back as the refund — the first time a channel has
+returned anything, because `close()` did not exist before.
+
+### Funds stranded in the earlier contract — cannot be recovered
+`close()` required a contract change (`funder` and `closed` fields), so it is a **new
+deployment**. The previous contract `0xd0D2D1680c17F1F11d246A80fc1E034c3d067766` has
+no withdrawal path of any kind, and still holds **288,286,620,000,000 wei** (~0.000288
+ETH) across its two channels. That is permanently locked: adding `close()` to a new
+deployment cannot reach an old one, and the old contract has no `selfdestruct`, no
+admin withdraw and no close.
+
+This contradicts the expectation that implementing `close()` would recover it. It does
+not, and no future milestone will — the ETH is gone for practical purposes. The lesson
+for the thesis write-up is a real one about upgradeability: an escrow contract with no
+exit path strands whatever is in it the moment its logic needs to change.
