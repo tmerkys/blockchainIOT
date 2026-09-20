@@ -78,17 +78,18 @@ contract SettlementTest is Test {
     }
 
     function _paid() internal view returns (uint256 paid) {
-        (,,,, paid,) = pc.channels(channelId);
+        (,,,,, paid,,) = pc.channels(channelId);
     }
 
     function _nonce() internal view returns (uint256 nonce) {
-        (,,,,, nonce) = pc.channels(channelId);
+        (,,,,,, nonce,) = pc.channels(channelId);
     }
 
     // ------------------------------------------------------------------ tests
 
     function test_openRegistersSignersAndDeposit() public view {
-        (address d, address g, address m, uint256 deposit, uint256 paid, uint256 nonce) = pc.channels(channelId);
+        (address d, address g, address m, address f, uint256 deposit, uint256 paid, uint256 nonce, bool closed) =
+            pc.channels(channelId);
 
         assertEq(d, device);
         assertEq(g, gateway);
@@ -96,6 +97,10 @@ contract SettlementTest is Test {
         assertEq(deposit, DEPOSIT);
         assertEq(paid, 0);
         assertEq(nonce, 0);
+        // open() records its caller as the refund destination; this test contract
+        // paid the deposit, so it is the funder.
+        assertEq(f, address(this));
+        assertFalse(closed);
         assertEq(address(pc).balance, DEPOSIT);
     }
 

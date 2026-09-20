@@ -92,12 +92,17 @@ SETTLE_ABI: list[dict[str, Any]] = [
             {"name": "device", "type": "address"},
             {"name": "gateway", "type": "address"},
             {"name": "merchant", "type": "address"},
+            {"name": "funder", "type": "address"},
             {"name": "deposit", "type": "uint256"},
             {"name": "paid", "type": "uint256"},
             {"name": "nonce", "type": "uint256"},
+            {"name": "closed", "type": "bool"},
         ],
     },
 ]
+
+# `close()` takes the same arguments as `settle()`; only the selector differs.
+SETTLE_ABI.append({**SETTLE_ABI[0], "name": "close"})
 
 
 def receipt_int(value: Any) -> int | None:
@@ -237,6 +242,8 @@ class RelayResult(BaseModel):
     accepted: bool
     submitted: bool
     reason: str | None = None
+    closed: bool = False
+    """True when this transaction was `close()` rather than `settle()`."""
 
     channel: str
     nonce: int
@@ -386,15 +393,22 @@ class Relayer:
         sig_device: bytes,
         sig_gateway: bytes,
         sig_merchant: bytes,
+        *,
+        close: bool = False,
     ) -> dict[str, Any]:
-        """Encode `settle(...)` into an unsigned transaction dict.
+        """Encode `settle(...)` — or `close(...)` — into an unsigned transaction.
+
+        `close` takes the identical arguments and the identical 3-of-3 checks;
+        it additionally returns the unspent deposit to the funder and marks the
+        channel finished. It is what M4 submits after 200 ticks have
+        accumulated off-chain.
 
         `nonce`, `gas` and the fee fields are left out on purpose - they are
         filled in at submit time, when an RPC is actually reachable, so the
         calldata can be built and tested with no chain at all.
         """
         calldata = self._contract.encode_abi(
-            "settle",
+            "close" if close else "settle",
             args=[
                 (
                     voucher.channel,
@@ -538,6 +552,7 @@ class Relayer:
         sig_device: bytes,
         sig_merchant: bytes | None = None,
         *,
+        close: bool = False,
         t0: float | None = None,
         t1: float | None = None,
         t2: float | None = None,
@@ -558,7 +573,9 @@ class Relayer:
             raise VoucherRejected("missing merchant signature: settle() is 3-of-3")
 
         sig_gateway = self.sign(voucher)
-        tx = self.build_settle_tx(voucher, sig_device, sig_gateway, sig_merchant or b"")
+        tx = self.build_settle_tx(
+            voucher, sig_device, sig_gateway, sig_merchant or b"", close=close
+        )
 
         result = RelayResult(
             accepted=True,
@@ -570,6 +587,7 @@ class Relayer:
             device=device,
             gateway=self.gateway_address,
             merchant=merchant,
+            closed=close,
             calldata=tx["data"],
             t0=t0,
             t1=t1,
@@ -594,9 +612,16 @@ class Relayer:
         """
         address = to_checksum_address(channel)
         try:
-            device, gateway, merchant, deposit, paid, nonce = self._contract.functions.channels(
-                address
-            ).call()
+            (
+                device,
+                gateway,
+                merchant,
+                funder,
+                deposit,
+                paid,
+                nonce,
+                closed,
+            ) = self._contract.functions.channels(address).call()
         except Exception as exc:
             raise RelayerNotReady(f"could not read channel {address}: {exc}") from exc
 
@@ -608,9 +633,15 @@ class Relayer:
             "device": device,
             "gateway": gateway,
             "merchant": merchant,
+            "funder": funder,
             "deposit": deposit,
             "paid": paid,
             "nonce": nonce,
+            "closed": closed,
+            # What the device may still accumulate against. A voucher above this
+            # reverts as "exceeds deposit", and the device cannot work that out
+            # for itself without an RPC.
+            "remaining": deposit - paid,
         }
 
     # --- health -------------------------------------------------------------

@@ -68,6 +68,16 @@ class VoucherRequest(BaseModel):
     t0: float | None = Field(default=None, description="Pi: sensor event fires")
     t1: float | None = Field(default=None, description="Pi: voucher signed")
 
+    close: bool = Field(
+        default=False,
+        description=(
+            "Submit close() instead of settle(): pay the merchant this voucher's "
+            "delta, refund the unspent deposit to the funder, and finish the "
+            "channel. This is the single on-chain transaction M4 amortises 200 "
+            "off-chain ticks over."
+        ),
+    )
+
     @field_validator("sigDevice", "sigMerchant")
     @classmethod
     def _validate_signature(cls, v: str | None) -> str | None:
@@ -136,6 +146,7 @@ def create_app(relayer: Relayer | None = None) -> FastAPI:
             req.voucher,
             HexBytes(req.sigDevice),
             HexBytes(req.sigMerchant) if req.sigMerchant else None,
+            close=req.close,
             t0=req.t0,
             t1=req.t1,
             t2=getattr(request.state, "t2", None),

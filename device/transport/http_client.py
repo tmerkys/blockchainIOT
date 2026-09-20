@@ -210,7 +210,7 @@ class HttpTransport:
         """Round trip of the most recent POST, or None if none has completed."""
         return self.last_marks.rtt_ns if self.last_marks else None
 
-    def build_request(self, signed: SignedVoucher) -> dict[str, Any]:
+    def build_request(self, signed: SignedVoucher, *, close: bool = False) -> dict[str, Any]:
         """Map the device's wire payload onto the gateway's request schema."""
         wire = signed.to_wire()
         body: dict[str, Any] = {
@@ -222,18 +222,22 @@ class HttpTransport:
             "t0": wire["marks"]["t0_ns"] / 1e9,
             "t1": wire["marks"]["t1_ns"] / 1e9,
         }
+        if close:
+            # Ask for close() rather than settle(): the last voucher of a
+            # channel both pays the merchant and returns the remainder.
+            body["close"] = True
         if self.countersign is not None:
             body["sigMerchant"] = self.countersign(signed.voucher)
         return body
 
-    def send(self, signed: SignedVoucher) -> dict[str, Any]:
+    def send(self, signed: SignedVoucher, *, close: bool = False) -> dict[str, Any]:
         """POST one voucher and return the gateway's `RelayResult` as a dict.
 
         Raises `GatewayError` on a refusal or a dead gateway. A voucher that was
         accepted but not submitted is *not* an error - that is calldata-only
         mode, and the caller reads `submitted` to tell the two apart.
         """
-        body = self.build_request(signed)
+        body = self.build_request(signed, close=close)
         endpoint = f"{self.url}/voucher"
 
         # Both clocks, at both ends of the exchange. `t4_dev` is mark t4 taken
