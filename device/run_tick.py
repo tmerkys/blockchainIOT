@@ -121,23 +121,28 @@ def report(result: dict[str, Any], signed: Any, marks: DeviceMarks) -> None:
     """Print the decomposition, keeping each span's clock explicit."""
     t2, t3, t4, t5, t6 = (result.get(k) for k in ("t2", "t3", "t4", "t5", "t6"))
     signing_ns = signed.signing_ns
-    reported_ns = marks.t4_dev_mono_ns - signed.event.t0_mono_ns
+    wall_ns = marks.t4_dev_mono_ns - signed.event.t0_mono_ns
+    reported_ns = marks.reported_latency_ns(signed.event.t0_mono_ns, t4, t6)
 
     print("\n--- device clock (Pi, monotonic) ---------------------------------")
     print(f"  signing          t1 - t0       {ms(signing_ns)}")
     print(f"  round trip       t4_dev - send {ms(marks.rtt_ns)}")
-    print(f"  REPORTED         t4_dev - t0   {ms(reported_ns)}   <- the H1 number")
+    print(f"  reply wait       t4_dev - t0   {ms(wall_ns)}   (includes the confirm wait)")
+    print(f"  REPORTED         t4  - t0      {ms(reported_ns)}   <- the H1 number")
+    print("    = reply wait - the gateway's post-receipt hold (t6 - t4). CLAUDE.md")
+    print("      scores confirmation depth as t5 - t4 and keeps it out of t4 - t0.")
 
     print("\n--- gateway clock (laptop, internal spans only) -------------------")
     print(f"  build + broadcast  t3 - t2     {gateway_ms(t3, t2)}")
     print(f"  inclusion          t4 - t3     {gateway_ms(t4, t3)}")
     print(f"  confirmation       t5 - t4     {gateway_ms(t5, t4)}")
-    print(f"  gateway total      t4 - t2     {gateway_ms(t4, t2)}")
+    print(f"  post-receipt hold  t6 - t4     {ms(marks.post_receipt_ns(t4, t6))}")
+    print(f"  gateway occupancy  t6 - t2     {gateway_ms(t6, t2)}")
 
     print("\n--- derived (no clock-offset term) -------------------------------")
-    network_ns = marks.network_ns(t2, t4)
+    network_ns = marks.network_ns(t2, t6)
     print(f"  network + framing, both legs   {ms(network_ns)}")
-    print("    = device round trip - gateway total; each span is one clock,")
+    print("    = device round trip - gateway occupancy; each span is one clock,")
     print("      so the two machines' offsets cancel instead of accumulating.")
 
     print("\n--- clock skew check (diagnostic only) ---------------------------")

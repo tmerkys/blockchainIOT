@@ -93,19 +93,58 @@ class DeviceMarks:
         """Device-observed round trip: request out to reply in, one clock."""
         return self.t4_dev_mono_ns - self.t_send_mono_ns
 
-    def network_ns(self, t2: float | None, t4: float | None) -> int | None:
+    def network_ns(self, t2: float | None, t6: float | None) -> int | None:
         """Time on the wire in both directions, with no clock-skew term.
 
-        `rtt_ns` is measured entirely on the device's clock; `t4 - t2` is
+        `rtt_ns` is measured entirely on the device's clock; `t6 - t2` is
         measured entirely on the gateway's. Subtracting one span from the
         other leaves what the gateway was not doing — the two network legs
         plus HTTP framing — and the two clocks' offsets never enter, because
         neither span ever crossed between them. This is the one honest way to
         get the transport term of the decomposition out of a two-machine run.
+
+        The end mark is `t6` (the gateway handing the response back), not
+        `t4` (the receipt). The gateway holds the request open past `t4` while
+        it waits for confirmation depth, so measuring to `t4` books that wait
+        as network time. Against anvil that was ~1 ms and invisible; against
+        Base Sepolia it was 2 s, and turned a 7 ms LAN into a reported 2010 ms
+        of "network".
         """
-        if t2 is None or t4 is None:
+        if t2 is None or t6 is None:
             return None
-        return self.rtt_ns - round((t4 - t2) * 1e9)
+        return self.rtt_ns - round((t6 - t2) * 1e9)
+
+    def post_receipt_ns(self, t4: float | None, t6: float | None) -> int | None:
+        """How long the gateway held the response *after* the receipt landed.
+
+        Confirmation waiting plus serialisation. Both marks are the gateway's,
+        so this is a clean single-clock duration.
+        """
+        if t4 is None or t6 is None:
+            return None
+        return round((t6 - t4) * 1e9)
+
+    def reported_latency_ns(
+        self, t0_mono_ns: int, t4: float | None, t6: float | None
+    ) -> int | None:
+        """CLAUDE.md's `t4 - t0`: sensor event to block inclusion.
+
+        `t4_dev - t0` is the device-clock span from the sensor event to the
+        reply landing, but the reply is sent at `t6`, not `t4` — so it carries
+        the gateway's confirmation wait, which CLAUDE.md scores as `t5 - t4`
+        and explicitly keeps out of the reported number.
+
+        Subtracting `t6 - t4` fixes that without reintroducing skew: it is a
+        *duration* on the gateway's clock being removed from a *duration* on
+        the device's. Durations carry no epoch, so no offset enters — only
+        relative drift between two oscillators over a few seconds, which is
+        nanoseconds. Instants would be a different matter, and that is the
+        subtraction this class exists to avoid.
+        """
+        post = self.post_receipt_ns(t4, t6)
+        if post is None:
+            return None
+        return (self.t4_dev_mono_ns - t0_mono_ns) - post
 
     def clock_offset_ns(self, t2: float | None, t6: float | None) -> int | None:
         """Estimated gateway-clock-minus-device-clock offset, NTP-style.
