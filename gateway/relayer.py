@@ -218,6 +218,13 @@ class RelayResult(BaseModel):
     t4: float | None = None  # gateway: receipt received (included in block)
     t5: float | None = None  # gateway: N-confirmation depth reached
 
+    # Not one of CLAUDE.md's marks. Stamped by the API handler just before the
+    # response goes back, purely so the device can pair (t2, t6) with its own
+    # (send, receive) instants and estimate the clock offset between the two
+    # machines - the skew sanity check CLAUDE.md asks for from M2 onward.
+    # Nothing is ever computed by subtracting it from a device-side mark.
+    t6: float | None = None  # gateway: response handed back to the transport
+
 
 class Relayer:
     """Verifies vouchers and turns them into `settle()` transactions.

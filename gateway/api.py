@@ -132,7 +132,7 @@ def create_app(relayer: Relayer | None = None) -> FastAPI:
         built, nothing was broadcast. 422 means the voucher itself is bad.
         """
         relayer: Relayer = request.app.state.relayer
-        return relayer.relay(
+        result = relayer.relay(
             req.voucher,
             HexBytes(req.sigDevice),
             HexBytes(req.sigMerchant) if req.sigMerchant else None,
@@ -140,6 +140,13 @@ def create_app(relayer: Relayer | None = None) -> FastAPI:
             t1=req.t1,
             t2=getattr(request.state, "t2", None),
         )
+        # Pairs with t2 to let the device estimate the clock offset between the
+        # two machines (M2). Taken here, the last gateway-side instant that can
+        # still ride inside the body - serialisation and the write to the
+        # socket fall outside it, which biases the estimate by microseconds and
+        # is why it stays a diagnostic rather than a correction.
+        result.t6 = time.time()
+        return result
 
     @app.get("/health")
     async def health(request: Request) -> dict[str, Any]:
