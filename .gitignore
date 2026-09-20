@@ -7,3 +7,7 @@ __pycache__/
 contracts/out/
 contracts/cache/
 contracts/foundry.lock
+
+# Keep every local env file out of git, but ship the template.
+.env.*
+!.env.example

@@ -39,7 +39,12 @@ log = logging.getLogger(__name__)
 
 ZERO_ADDRESS = "0x" + "00" * 20
 SIGNATURE_LENGTH = 65  # r + s + v
-RPC_TIMEOUT_S = 2.0
+RPC_TIMEOUT_S = 10.0
+"""Per-request HTTP timeout to the RPC endpoint. 2 s was fine against a local
+anvil on loopback and is not fine against a public endpoint like Base Sepolia,
+where a single `eth_estimateGas` crossing the internet under load can exceed it
+— and a timeout mid-run surfaces as a failed settlement, not a slow one.
+Override with `RPC_TIMEOUT_S` for a particularly slow provider."""
 
 RECEIPT_TIMEOUT_S = 120.0
 """Ceiling on the wait for inclusion. Long enough for a slow public testnet
@@ -115,6 +120,7 @@ class RelayerConfig:
     device_address: str | None = None
     merchant_address: str | None = None
     confirmations: int = 1
+    rpc_timeout: float = RPC_TIMEOUT_S
 
     submit: bool = False
     """Broadcast `settle()`, or stop once the calldata is built?
@@ -147,6 +153,15 @@ class RelayerConfig:
                 return False
             raise ValueError(f"{name} must be a boolean, got {raw!r}")
 
+        def number(name: str, default: float) -> float:
+            raw = env.get(name, "").strip()
+            if not raw:
+                return default
+            try:
+                return float(raw)
+            except ValueError as exc:
+                raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+
         def integer(name: str, default: int) -> int:
             raw = env.get(name, "").strip()
             if not raw:
@@ -172,6 +187,7 @@ class RelayerConfig:
             device_address=address("DEVICE_ADDRESS", defaults.device_address),
             merchant_address=address("MERCHANT_ADDRESS", defaults.merchant_address),
             confirmations=integer("CONFIRMATIONS", defaults.confirmations),
+            rpc_timeout=number("RPC_TIMEOUT_S", defaults.rpc_timeout),
             submit=boolean("GATEWAY_SUBMIT", defaults.submit),
         )
 
@@ -238,7 +254,9 @@ class Relayer:
     def __init__(self, config: RelayerConfig | None = None, w3: Web3 | None = None) -> None:
         self.config = config or RelayerConfig.from_env()
         self.w3 = w3 or Web3(
-            Web3.HTTPProvider(self.config.rpc_url, request_kwargs={"timeout": RPC_TIMEOUT_S})
+            Web3.HTTPProvider(
+                self.config.rpc_url, request_kwargs={"timeout": self.config.rpc_timeout}
+            )
         )
         self._contract = self.w3.eth.contract(
             address=to_checksum_address(self.config.payment_channel), abi=SETTLE_ABI
