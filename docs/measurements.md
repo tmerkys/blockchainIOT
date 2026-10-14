@@ -549,4 +549,4 @@ Welch t-test, latency eth vs wifi: t = −2.24, p = 0.030. Network term: t = −
   publicnode's pool lag is back. Excluded from the reported number by construction.
 
 ### Budget after
-Gateway ~0.000127 ETH after 66 settles + one open.
+Gateway holds **120,341,615,040,646 wei** (~0.000120 ETH) after 66 settles, one open and the 0.00001 ETH deposit.
