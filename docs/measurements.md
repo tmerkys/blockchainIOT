@@ -500,3 +500,53 @@ With both links up the kernel routes everything over `eth0` (metric 100 < 600), 
 "WiFi" run with the cable still connected would silently be an Ethernet run. Each
 condition must take the other interface down, and each CSV row must record the
 interface the traffic actually left by, not the one the condition intended.
+
+## M5 — Base Sepolia (L2), Ethernet and WiFi, N=30 each (2026-10-14)
+- Chain: Base Sepolia, chainId 84532, RPC `https://base-sepolia-rpc.publicnode.com`
+- Commit: **02b8bb5** on both machines (recorded per row as `commit` / `piCommit`)
+- Contract `0xb746530c7e38aB163dE7238f70FE1e91c5E14bF9`, channel
+  `0x69af732caC97151F7bE06C2DeF0E84F222D420D2` (opened for M5:
+  [`0xd45879cc…6a36a`](https://sepolia.basescan.org/tx/0xd45879cca24a9aae690803e60209aa6157137085c7cf74945c8899206296a36a),
+  149,967 gas, deposit 0.00001 ETH). Nonces 1–6 were smoke runs, not in the dataset.
+- Runner: `experiments/runner.py`, gap uniform 2–4 s, other interface taken down per condition,
+  route checked before every tick. Network setup as in the "M5 setup" entry above.
+- Data: `experiments/results/m5_base-sepolia_eth_20261014T145732Z-251679.csv`,
+  `experiments/results/m5_base-sepolia_wifi_20261014T150030Z-880a87.csv`
+- **Pi config, as-is (defaults):** WiFi power save **on** (NM `powersave=default`, brcmfmac default);
+  CPU governor **`ondemand`**, 600–1800 MHz. Both shape the numbers below — see "Reading this row".
+
+### Results (60/60 ok, 0 failed, 0 reverted)
+| | Ethernet mean ± 95% CI (median) | WiFi mean ± 95% CI (median) |
+|---|---|---|
+| **reported `t4-t0`** | **1041.9 ± 66.0 ms** (1005.6) | **1173.2 ± 100.3 ms** (1102.8) |
+| signing `t1-t0` | 34.1 ± 3.5 ms (38.9) | 30.8 ± 4.4 ms (38.6) |
+| network, both legs | 7.4 ± 0.7 ms (7.3) | 145.7 ± 67.6 ms (17.8) |
+| gateway build + broadcast `t3-t2` | 735.9 ± 45.8 ms | 741.4 ± 37.5 ms |
+| L2 inclusion `t4-t3` | 233.9 ± 47.1 ms | 225.5 ± 57.4 ms |
+| confirmation `t5-t4` (not in reported) | 1572.0 ± 184.9 ms | 1428.4 ± 199.7 ms |
+| clock offset (diagnostic) | +2.1 ms | −63.0 ms (median +0.4) |
+| gasUsed | 77,278 | 77,290 |
+| total fee (L2 exec + l1Fee) | 4.66e11 wei | 4.64e11 wei |
+
+Welch t-test, latency eth vs wifi: t = −2.24, p = 0.030. Network term: t = −4.19, p = 0.0002.
+
+### Reading this row
+- **H1 latency: ~1.0–1.2 s end-to-end on L2**, "low seconds" as hypothesised. The biggest
+  component is not the chain: `t3-t2` (gateway ↔ public RPC round trips) is ~740 ms, inclusion
+  only ~230 ms. A keyed RPC endpoint remains the highest-leverage improvement (open since M3).
+- **WiFi network term is bimodal.** 19/30 runs at 10–18 ms; 11/30 at 187–518 ms. In each slow run
+  the offset estimate ≈ −½ × network, i.e. the whole excess is on the gateway→Pi leg: the AP
+  buffering the reply for a dozing radio. This is WiFi power save, not link quality. The eth/wifi
+  latency difference (~130 ms) is almost entirely this effect.
+- **Signing ~39 ms median, vs 13.2 ms in M4.** M4 signed back-to-back with the CPU already
+  clocked up; here 2–4 s idle gaps let `ondemand` drop to 600 MHz first. The same 13 ms appears
+  in runs that caught a high clock. Not a regression — a governor effect, and an M7 confound.
+- **l1Fee ≈ 100–3000 wei**, vs ~1.8e10 wei at M3. Base Sepolia's L1 data cost has collapsed
+  since September; the L1 share of the fee is now ~0%. Recorded as observed, stated in ch. 4.
+- **gasUsed ≈ 77,280** per settle on this channel, vs 75,029 at M3. Small, stable (sd ~10);
+  to be stated, not silently compared.
+- **`t5-t4` ≈ 1.5 s again** with `CONFIRMATIONS=1` (was 69 ms after the M3 RPC switch):
+  publicnode's pool lag is back. Excluded from the reported number by construction.
+
+### Budget after
+Gateway ~0.000127 ETH after 66 settles + one open.
