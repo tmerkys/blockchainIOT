@@ -675,3 +675,62 @@ So the ~8 s is the slot time, not RPC slowness.
 ### Budget after
 Sepolia gateway: **49,969,070,816,102,527 wei** (~0.04997 ETH). The whole L1 baseline — deploy, open,
 deposit, 62 settles — cost ~3.1e13 wei at testnet prices.
+
+## H1 cost table — mainnet prices, reference date 2026-10-14
+- Script: `experiments/costs.py --date 2026-10-14`; outputs `experiments/analysis/costs_2026-10-14.{csv,json}`.
+- **Read-only mainnet access** (approved 2026-10-14): `eth_simulateV1`, `eth_feeHistory`, `eth_call`.
+  No mainnet key, no funds, nothing broadcast. RPCs: Ethereum `ethereum-rpc.publicnode.com`,
+  Base `mainnet.base.org` (publicnode's Base endpoint refuses history without a token).
+- Gas price: per block, base fee + median priority fee, 24 h before the run — Ethereum 7,201 blocks
+  to #26192178, Base 24 × 1,024-block windows to #52604441. ETH/EUR: CoinGecko daily, 2,228.86.
+
+### Gas units by simulation, validated against real transactions
+Ethereum Sepolia's repricing (fresh SSTORE 126k vs 43k; code deposit ~7x) is **not on mainnet**:
+Ethereum mainnet, Base mainnet and Base Sepolia charge identical gas for the probes and for the full
+lifecycle. So Sepolia's measured gas cannot stand in for mainnet L1. Gas units below come from
+`eth_simulateV1` of the whole lifecycle on each chain (throwaway keys, EIP-712 signed for that
+chainId, one contract, three channels). Controls — simulation vs the real testnet transactions:
+
+| control | simulated | measured | diff |
+|---|---|---|---|
+| Base Sepolia deploy / open first / open later | 2,037,870 / 167,067 / 149,967 | same | 0 / 0 / 0 |
+| Base Sepolia settle first / settle / close-only | 111,441 / 77,229 / 143,578 | 111,477 / 77,290 / 143,590 | −36 / −61 / −12 |
+| Eth Sepolia deploy / open first | 14,375,662 / 694,875 | 14,375,662 / 694,887 | 0 / −12 |
+| Eth Sepolia settle first (new merchant) / settle | 467,757 / 88,329 | 467,793 / 88,365 | −36 / −36 |
+
+All within 61 gas (calldata zero-byte noise from random signatures). Scenario matters and is
+explicit: `open` later vs first channel differs by 17,100 (`_channelIndex` 0→1); a first settle paying
+a never-funded merchant costs +25k on mainnet, +183k on Sepolia.
+
+### Mainnet prices, 24 h
+| | median | p10 | p90 |
+|---|---|---|---|
+| Ethereum gas price | 0.1163 gwei | 0.0670 | 0.8216 |
+| Base gas price | 0.0060 gwei | 0.0060 | 0.0065 |
+| Base L1 data fee, one settle (760 B signed) | 2.77e9 wei | 2.33e9 | 1.51e10 |
+
+### The table (EUR at 2,228.86 EUR/ETH; median [p10–p90])
+| operation | gas (both chains) | Ethereum L1 | Base L2 (exec + L1 data) |
+|---|---|---|---|
+| settle, per payment | 77,229 / 77,217 | **€0.0200** [0.0115–0.1414] | **€0.00104** [0.00104–0.00115] |
+| settle, first on channel | 111,441 | €0.0289 | €0.00150 |
+| open (later channel) | 149,967 | €0.0389 | €0.00201 |
+| close (only settlement, M4) | 143,566 | €0.0372 | €0.00193 |
+| deploy (one-off) | 2,037,870 | €0.528 | €0.0273 |
+| **per tick, channel, close/200** | 717.8 | €0.000186 | **€0.0000097** |
+| per tick, channel, (open+close)/200 | 1,467.7 | €0.000381 | €0.0000197 |
+
+### Reading this (H1 cost)
+- **Per settlement, L2 is ~19x cheaper than L1 at the median price** (€0.00104 vs €0.0200), and ~120x
+  at the day's p90 (€0.00115 vs €0.141): Ethereum's fee is volatile, Base's barely moves.
+  "Far below L1" holds, but the median gap is ~1.3 orders of magnitude, not more — Ethereum mainnet
+  gas was cheap on this date (0.12 gwei). State the date; the ratio moves with L1 congestion.
+- **The channel matters more than the chain.** 200 ticks per `close()` cuts per-payment cost ~108x
+  on either chain. Channel on L2 vs per-tick settle on L1: **€0.0000097 vs €0.0200, ~2,000x.**
+- **Base's L1 data fee is now negligible:** 2.8e9 wei of ~4.7e11 per settle, ~0.6%. CLAUDE.md's warning
+  that forgetting `l1Fee` "understates rollup cost by a lot" was true before blob data (EIP-4844); at
+  these blob prices it is not. Still measured and reported, because it is the term that would move
+  if blob demand rose (its own p90 is 5.5x its median).
+- Gas units are identical on both mainnets for this contract, so **the whole L1/L2 cost difference is
+  price, not gas**. On testnets it was the reverse (Sepolia's repricing changed the gas, the prices
+  were meaningless) — which is exactly why testnet cost figures are not used for H1.
