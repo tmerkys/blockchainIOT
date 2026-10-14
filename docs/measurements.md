@@ -563,3 +563,42 @@ Verified with laptop→Pi pings over `wlan0`, 3 s apart (the idle pattern the ru
 The 450–510 ms tail on 4/10 pings matches the slow-run cluster in the first M5 WiFi session, so
 the attribution there is confirmed. From this commit the runner records `wifiPowersave` and
 `cpuGovernor` in every row.
+
+## M5 — Base Sepolia, controlled Pi config, Ethernet and WiFi, N=30 each (2026-10-14)
+- Commit **23ca4a2** both machines. Same chain, contract, channel and runner settings as the
+  default-config pair above (channel nonces 67–126).
+- Pi config: WiFi powersave **disable**, CPU governor **performance** (all 4 cores, 1.8 GHz).
+  The governor was set by hand (`sysfs`, root) and does **not** survive a reboot; each row's
+  `cpuGovernor` column records what was actually in force.
+- Data: `m5_base-sepolia_eth_20261014T160935Z-dbbbcc.csv`, `m5_base-sepolia_wifi_20261014T161224Z-0ef90b.csv`
+- 60/60 ok.
+
+### Default vs controlled (mean ± 95% CI)
+| | eth default | eth controlled | wifi default | wifi controlled |
+|---|---|---|---|---|
+| **reported `t4-t0`** | 1041.9 ± 66.0 | **957.5 ± 54.5** | 1173.2 ± 100.3 | **984.6 ± 67.0** |
+| signing `t1-t0` | 34.1 ± 3.5 | **13.6 ± 0.1** | 30.8 ± 4.3 | **13.5 ± 0.1** |
+| network, both legs | 7.4 ± 0.7 | 6.1 ± 0.4 | 145.7 ± 67.5 | **13.5 ± 0.7** |
+| runs with network > 100 ms | 0 | 0 | 11 | **0** |
+| build + broadcast `t3-t2` | 735.9 | 709.7 | 741.3 | 704.1 |
+| L2 inclusion `t4-t3` | 233.9 | 214.7 | 225.4 | 240.4 |
+
+All in ms. gasUsed 77,290, total fee ≈ 4.65e11 wei per settle (unchanged by config, as expected).
+
+### Reading this row
+- **Both confounds removed.** Signing collapses to 13.5 ms with a CI of ±0.1 ms — the M4
+  back-to-back figure — confirming the governor attribution. The WiFi slow cluster is gone
+  (0/30 runs over 100 ms, down from 11/30), confirming power save.
+- **Controlled, WiFi costs ~7 ms more than Ethernet on the wire** (13.5 vs 6.1 ms; Welch
+  p ≈ 2e-22), but that is invisible end-to-end: latency eth vs wifi p = 0.52. At L2 block
+  cadence and public-RPC overhead, the device's link choice is not what limits latency.
+- **The default-config WiFi penalty (~190 ms) was almost entirely power save,** not the radio
+  link. That is a device-configuration finding for ch. 4: an IoT agent left with stock power
+  management pays it on every reply, and disabling power save costs energy (an M7 question).
+- **Where the second goes, controlled:** ~70% gateway↔RPC round trips (`t3-t2` ≈ 705 ms), ~23%
+  L2 inclusion (≈ 215–240 ms, half a block period on average as expected), ~2% signing, ~1%
+  network. The chain is not the bottleneck; the public RPC endpoint is.
+- Kurt et al. (2021) WiFi reference: 2.6 s. Ours: 0.98 s on WiFi with on-chain settlement per tick.
+
+### Budget after
+Gateway holds **92,463,517,804,653 wei** (~0.000092 ETH) after 126 settles on this channel.
