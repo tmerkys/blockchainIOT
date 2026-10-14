@@ -191,13 +191,19 @@ def main(argv: list[str] | None = None) -> int:
         help="reuse an already-deployed PaymentChannel instead of deploying a new one",
     )
     parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=ENV_FILE,
+        help="gateway env file to read and update; e.g. .env.sepolia for the L1 baseline",
+    )
+    parser.add_argument(
         "--gateway-host",
         default="0.0.0.0",
         help="interface uvicorn binds to; 0.0.0.0 is what lets the Pi reach it",
     )
     args = parser.parse_args(argv)
 
-    env = load_env()
+    env = load_env(args.env_file)
     (rpc_url,) = require(env, "RPC_URL")
     chain_id = int(env.get("CHAIN_ID", "31337"))
     gateway_key, merchant_key = require(env, "GATEWAY_PRIVATE_KEY", "MERCHANT_PRIVATE_KEY")
@@ -259,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print("\n=== 4. update the gateway's .env =================================")
     update_env(
-        ENV_FILE,
+        args.env_file,
         {
             "PAYMENT_CHANNEL_ADDRESS": contract.address,
             "DEVICE_ADDRESS": device,

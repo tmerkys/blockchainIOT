@@ -179,6 +179,13 @@ def main(argv: list[str] | None = None) -> int:
         help="abort the batch after this many failed runs in a row",
     )
     parser.add_argument("--tag", default="batch", help="names the local .jsonl backup")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=150.0,
+        help="HTTP timeout per voucher; the gateway holds the request until inclusion "
+        "(12 s blocks on L1, longer under congestion)",
+    )
     args = parser.parse_args(argv)
 
     env = load_env()
@@ -189,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     countersign, _ = merchant_countersigner(
         env["MERCHANT_PRIVATE_KEY"], config.chain_id, config.verifying_contract
     )
-    transport = HttpTransport(gateway_url, countersign=countersign)
+    transport = HttpTransport(gateway_url, countersign=countersign, timeout=args.timeout)
 
     state = transport.channel_state(config.channel)
     if not state.get("exists") or state.get("closed"):
@@ -203,7 +210,10 @@ def main(argv: list[str] | None = None) -> int:
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     backup = (LOG_DIR / f"{args.tag}.jsonl").open("a", encoding="utf-8")
-    say(f"batch {args.tag}: {args.n} runs, channel {config.channel}, nonce from {state['nonce']}")
+    say(
+        f"batch {args.tag}: {args.n} runs, chain {config.chain_id}, "
+        f"channel {config.channel}, nonce from {state['nonce']}"
+    )
 
     failures = 0
     for run in range(1, args.n + 1):

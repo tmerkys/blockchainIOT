@@ -43,13 +43,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default=None, help="override GATEWAY_HOST")
     parser.add_argument("--port", type=int, default=None, help="override GATEWAY_PORT")
     parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=REPO_ROOT / ".env",
+        help="which env file to serve from; .env.sepolia for the L1 baseline",
+    )
+    parser.add_argument(
         "--allow-degraded",
         action="store_true",
         help="start even if the config is incomplete (bring-up only, never a run)",
     )
     args = parser.parse_args(argv)
 
-    env = load_env()
+    env = load_env(args.env_file)
     missing = [k for k in REQUIRED if not env.get(k)]
     if missing and not args.allow_degraded:
         raise SystemExit(

@@ -69,6 +69,22 @@ TRANSPORTS = {
 
 CHAINS = {31337: "anvil", 84532: "base-sepolia", 11155111: "sepolia"}
 
+# Seconds between runs, uniform. At least one block period, so consecutive runs
+# land at uncorrelated points in the block cycle (Base 2 s, Ethereum 12 s).
+DEFAULT_GAP = {"sepolia": (12.0, 24.0)}
+DEFAULT_GAP_L2 = (2.0, 4.0)
+
+
+def pi_overlay(chain: str) -> str:
+    """Per-chain overrides on the Pi, sourced over its `.env` for one session.
+
+    Only CHAIN_ID / VERIFYING_CONTRACT / CHANNEL_ADDRESS differ between chains;
+    the device key, gateway URL and merchant key do not, so they stay in the
+    one `.env` and the overlay holds just the three that do. Base Sepolia,
+    where M2–M5 started, is the no-overlay case.
+    """
+    return f".env.{chain}"
+
 SESSION_COLUMNS = [
     "session",
     "transport",
@@ -171,10 +187,16 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit("gateway is in calldata-only mode (GATEWAY_SUBMIT=0); nothing would settle")
 
     chain_id = int(health["chainId"])
+    chain = CHAINS.get(chain_id, str(chain_id))
+    overlay = pi_overlay(chain)
+    # Overlay lines come second, so they win in the dict — same precedence the
+    # batch gets from sourcing the overlay into the environment.
     pi_env = dict(
         line.split("=", 1)
-        for line in ssh(f"grep -E '^(CHAIN_ID|VERIFYING_CONTRACT|CHANNEL_ADDRESS)=' {PI_REPO}/.env")
-        .splitlines()
+        for line in ssh(
+            f"cd {PI_REPO} && grep -hE '^(CHAIN_ID|VERIFYING_CONTRACT|CHANNEL_ADDRESS)=' "
+            f".env $(test -f {overlay} && echo {overlay})"
+        ).splitlines()
         if "=" in line
     )
     if int(pi_env.get("CHAIN_ID", -1)) != chain_id:
@@ -215,7 +237,7 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
         "commit": commit_id(head, dirty),
         "piCommit": commit_id(pi_head, pi_dirty),
         "chainId": chain_id,
-        "chain": CHAINS.get(chain_id, str(chain_id)),
+        "chain": chain,
         "contract": health["paymentChannel"],
         "channel": pi_env["CHANNEL_ADDRESS"],
         "addrs": addrs,
@@ -271,13 +293,23 @@ def run_session(args: argparse.Namespace, meta: dict[str, Any]) -> Path:
     args.results_dir.mkdir(parents=True, exist_ok=True)
     path = args.results_dir / f"m5_{meta['chain']}_{args.transport}_{session}.csv"
 
+    gap_min, gap_max = (
+        (args.gap_min, args.gap_max)
+        if args.gap_min is not None and args.gap_max is not None
+        else DEFAULT_GAP.get(meta["chain"], DEFAULT_GAP_L2)
+    )
+    overlay = pi_overlay(meta["chain"])
     batch = " ".join(
         [
             f"cd {PI_REPO} &&",
+            # Environment beats .env in load_env(), so sourcing the overlay
+            # retargets the device without editing its .env.
+            f"set -a && {{ test -f {overlay} && . ./{overlay} || true; }} && set +a &&",
             "./venv/bin/python device/run_batch.py",
             f"--n {args.n}",
             f"--expect-iface {measured}",
-            f"--gap-min {args.gap_min} --gap-max {args.gap_max}",
+            f"--gap-min {gap_min} --gap-max {gap_max}",
+            f"--timeout {args.timeout}",
             f"--seed {seed}",
             f"--tag {shlex.quote(session)}",
         ]
@@ -324,8 +356,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--transport", choices=[*TRANSPORTS, "ble"], required=True)
     parser.add_argument("--n", type=int, default=30, help="runs (CLAUDE.md: N>=30)")
     parser.add_argument("--gateway", default="http://127.0.0.1:8000", help="gateway URL, laptop side")
-    parser.add_argument("--gap-min", type=float, default=2.0)
-    parser.add_argument("--gap-max", type=float, default=4.0)
+    parser.add_argument("--gap-min", type=float, default=None, help="default: per chain")
+    parser.add_argument("--gap-max", type=float, default=None, help="default: per chain")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=150.0,
+        help="Pi-side HTTP timeout; must outlast the gateway's 120 s receipt wait on L1",
+    )
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument(
         "--results-dir",
