@@ -602,3 +602,76 @@ All in ms. gasUsed 77,290, total fee ≈ 4.65e11 wei per settle (unchanged by co
 
 ### Budget after
 Gateway holds **92,463,517,804,653 wei** (~0.000092 ETH) after 126 settles on this channel.
+
+## M5 — L1 baseline: Ethereum Sepolia, controlled Pi config, Ethernet and WiFi, N=30 each (2026-10-14)
+- Chain: **Ethereum Sepolia, chainId 11155111**, RPC `https://ethereum-sepolia-rpc.publicnode.com`
+  (client reth/v2.7.0). Gateway env `.env.sepolia`; Pi overlay `~/magis/.env.sepolia`.
+- Commit **c9b0329** both machines. Pi config controlled (powersave disable, governor performance).
+- Funding: 0.05 ETH from the Google Cloud Sepolia faucet to the gateway `0xc2084f9f…B324`.
+- Contract `0xd0D2D1680c17F1F11d246A80fc1E034c3d067766`
+  ([deploy `0x90b9a838…a973f`](https://sepolia.etherscan.io/tx/0x90b9a83829449730ab329bfa88d36eb2041913c8151f4ea2e07d16ad093a973f)),
+  channel `0x8800F104092fAA7f5A0F0DF6aa47671Dad264685`
+  ([open `0x0d1dd6a5…eed9`](https://sepolia.etherscan.io/tx/0x0d1dd6a5ba7506e88aa43dcbdf5899061525ae7ecfc06817992a345febcdeed9)),
+  deposit 0.00001 ETH. Nonces 1–2 smoke, 3–62 dataset.
+- **Address collision, not a mix-up:** the Sepolia contract has the same address as the retired M3
+  contract on Base Sepolia, and the channel id equals the closed M4 Base channel. Both follow from the
+  same deployer key at the same account nonce (and the M6 finding that channel ids omit the contract).
+  Every row carries `chainId` and `contract`; never key on address alone.
+- Gap 12–24 s (≥ one 12 s slot). Data: `m5_sepolia_eth_20261014T163602Z-960d1c.csv`,
+  `m5_sepolia_wifi_20261014T164908Z-4086b4.csv`. **60/60 ok.**
+
+### Same build, much higher gas for state creation
+Creation bytecode is byte-identical to the Base deployment (verified on-chain); the runtime code
+differs only in three short runs holding the EIP-712 immutables (cached chainId and
+`address(this)`). The gas is not:
+
+| | Base Sepolia (L2) | Ethereum Sepolia (L1) | ratio |
+|---|---|---|---|
+| deploy | 2,037,870 | **14,375,662** | 7.05x |
+| `open()` | 167,067 (M4) / 149,967 (M5) | **694,887** | ~4.2x |
+| first `settle()` on a channel | 111,477 | **467,793** | 4.2x |
+| subsequent `settle()` | 77,290 | **88,365** | 1.14x |
+
+The pattern — large multipliers exactly where new state is created (code deposit, fresh storage
+slots), small where existing slots are updated — is consistent with Ethereum Sepolia running a
+**state-creation gas repricing that Base Sepolia has not adopted**. *Which* upgrade/EIP must be
+confirmed from the Sepolia fork schedule before ch. 4 names it. Consequence for H1: "gas units are
+reproducible" holds per chain, but the **same contract no longer costs the same gas units on L1 and
+L2**, so the cost table must state gas per chain.
+
+### Results, controlled config (mean ± 95% CI, ms)
+| | L2 Base eth | L2 Base wifi | **L1 Eth eth** | **L1 Eth wifi** |
+|---|---|---|---|---|
+| **reported `t4-t0`** | 957.5 ± 54.5 | 984.6 ± 67.0 | **8169.9 ± 1454.7** | **8736.4 ± 1354.8** |
+| median | 981.5 | 984.6 | 8400.3 | 8695.5 |
+| signing | 13.6 | 13.5 | 13.6 | 13.5 |
+| network, both legs | 6.1 | 13.5 | 8.5 | 18.3 |
+| build + broadcast `t3-t2` | 709.7 | 704.1 | 676.6 | 682.4 |
+| block inclusion `t4-t3` | 214.7 | 240.4 | **7458.0** | **8009.0** |
+| gasUsed (settle) | 77,290 | 77,290 | 88,360 | 88,378 |
+| effectiveGasPrice | ~6.0e6 wei | ~6.0e6 wei | ~1.0e6 wei | ~1.0e6 wei |
+
+L1 − L2 latency: **+7.2 s** (eth, p = 4.7e-11), **+7.8 s** (wifi, p = 1.6e-12). The whole difference
+is block inclusion; build + broadcast does not differ (p = 0.11 / 0.19). WiFi vs Ethernet on L1:
+p = 0.56 — as on L2, the device's link is invisible end-to-end.
+
+### Inclusion verified against block timestamps
+For all 60 L1 rows, broadcast (`t3`) → block timestamp is 0.8–13.4 s (mean 6.5 s, ~half a slot) and
+**every transaction landed in the next block** — none waited an extra slot at 0.001 gwei. Block
+timestamp → receipt seen (`t4`) is 1.2 s mean (max 3.5 s): propagation + RPC lag, inside `t4-t3`.
+So the ~8 s is the slot time, not RPC slowness.
+
+### Reading this row (H1)
+- **Latency:** L2 settles ~8.5x faster (≈1.0 s vs ≈8.2–8.7 s). On L2 the public RPC round trips
+  dominate (~70%); on L1 the block slot dominates (~90%). Kurt et al. (2021) WiFi 2.6 s sits between.
+- **Cost: testnet prices do not show the L1/L2 gap and must not be used for it.** Sepolia gas was
+  ~0.001 gwei, Base Sepolia ~0.006 gwei — on testnets L1 *looks* cheaper. The cost comparison must be
+  gas units per chain (table above) × mainnet gas prices pinned to one stated date, plus Base's L1
+  data fee. Not done yet — needs the reference date chosen.
+- Network term is ~2–5 ms higher in the L1 sessions than the L2 controlled sessions on the same
+  links (eth 8.5 vs 6.1, wifi 18.3 vs 13.5). Same config, ~30 min later; ambient LAN/RF load is the
+  plausible cause. Small against an 8 s total, noted so it is not mistaken for a chain effect.
+
+### Budget after
+Sepolia gateway: **49,969,070,816,102,527 wei** (~0.04997 ETH). The whole L1 baseline — deploy, open,
+deposit, 62 settles — cost ~3.1e13 wei at testnet prices.

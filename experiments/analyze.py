@@ -60,13 +60,18 @@ TERMS = [
     ("signing_ms", "Signing (Pi)"),
     ("network_ms", "Network, both legs"),
     ("build_ms", "Gateway build + broadcast"),
-    ("inclusion_ms", "L2 inclusion"),
+    ("inclusion_ms", "Block inclusion"),
     ("other_ms", "Other (countersign, framing)"),
 ]
 METRICS = ["latency_ms"] + [t for t, _ in TERMS] + ["confirm_ms", "clock_offset_ms", "gasUsed", "fee_wei"]
 
 TRANSPORT_LABEL = {"eth": "Ethernet", "wifi": "WiFi", "ble": "Bluetooth"}
 TRANSPORT_ORDER = ["eth", "wifi", "ble"]
+CHAIN_LABEL = {"base-sepolia": "L2 Base", "sepolia": "L1 Ethereum", "anvil": "anvil"}
+
+
+def cond_label(chain: str, transport: str, config: str, sep: str = "\n") -> str:
+    return sep.join([CHAIN_LABEL.get(chain, chain), TRANSPORT_LABEL.get(transport, transport), config])
 
 # Reference palette (dataviz skill, light mode). Categorical slots in fixed
 # order; validated for adjacent use as a 5-slot set. Slots 3–5 are under 3:1
@@ -157,33 +162,57 @@ def summarise(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def welch(df: pd.DataFrame) -> pd.DataFrame:
-    """eth vs every other transport, per (chain, config), per metric."""
-    ok = df[df["status"] == "ok"]
+def _welch_rows(
+    a: pd.DataFrame, b: pd.DataFrame, la: str, lb: str, scope: str, config: str, metrics: list[str]
+) -> list[dict]:
     rows = []
+    for metric in metrics:
+        res = stats.ttest_ind(b[metric], a[metric], equal_var=False)  # sign follows b - a
+        rows.append(
+            {
+                "scope": scope,
+                "config": config,
+                "a": la,
+                "b": lb,
+                "metric": metric,
+                "mean_a": a[metric].mean(),
+                "mean_b": b[metric].mean(),
+                "diff_b_minus_a": b[metric].mean() - a[metric].mean(),
+                "t": res.statistic,
+                "df": res.df,
+                "p": res.pvalue,
+            }
+        )
+    return rows
+
+
+def welch(df: pd.DataFrame) -> pd.DataFrame:
+    """Two families of Welch t-tests, each holding everything else fixed.
+
+    * transport: eth vs every other transport, within one (chain, config);
+      `scope` is the chain.
+    * chain: L2 (Base Sepolia) vs L1 (Ethereum Sepolia), within one
+      (transport, config) — the H1 comparison; `scope` is the transport.
+    """
+    ok = df[df["status"] == "ok"]
+    rows: list[dict] = []
     for (chain, config), g in ok.groupby(["chain", "config"]):
         if "eth" not in set(g["transport"]):
             continue
         base = g[g["transport"] == "eth"]
         for other in sorted(set(g["transport"]) - {"eth"}):
-            h = g[g["transport"] == other]
-            for metric in ["latency_ms", "network_ms", "signing_ms"]:
-                res = stats.ttest_ind(h[metric], base[metric], equal_var=False)  # sign follows b - a
-                rows.append(
-                    {
-                        "chain": chain,
-                        "config": config,
-                        "a": "eth",
-                        "b": other,
-                        "metric": metric,
-                        "mean_a": base[metric].mean(),
-                        "mean_b": h[metric].mean(),
-                        "diff_b_minus_a": h[metric].mean() - base[metric].mean(),
-                        "t": res.statistic,
-                        "df": res.df,
-                        "p": res.pvalue,
-                    }
-                )
+            rows += _welch_rows(
+                base, g[g["transport"] == other], "eth", other, chain, config,
+                ["latency_ms", "network_ms", "signing_ms"],
+            )
+    for (transport, config), g in ok.groupby(["transport", "config"]):
+        if not {"base-sepolia", "sepolia"} <= set(g["chain"]):
+            continue
+        rows += _welch_rows(
+            g[g["chain"] == "base-sepolia"], g[g["chain"] == "sepolia"],
+            "base-sepolia", "sepolia", transport, config,
+            ["latency_ms", "inclusion_ms", "build_ms", "gasUsed"],
+        )
     return pd.DataFrame(rows)
 
 
@@ -208,8 +237,8 @@ def print_summary(summary: pd.DataFrame, tests: pd.DataFrame) -> None:
         print("\n== Welch t-tests (b - a)")
         for _, r in tests.iterrows():
             print(
-                f"  {r.chain:<13}{r.config:<11}{r.metric:<12} {r.b} - {r.a}: "
-                f"{r.diff_b_minus_a:+8.1f} ms   t={r.t:+6.2f}  p={r.p:.2g}"
+                f"  {r.scope:<13}{r.config:<11}{r.metric:<13} {r.b} - {r.a}: "
+                f"{r.diff_b_minus_a:+10.1f}   t={r.t:+7.2f}  p={r.p:.2g}"
             )
 
 
@@ -261,73 +290,103 @@ def condition_order(frame: pd.DataFrame) -> list[tuple[str, str, str]]:
     )
 
 
+def by_chain(conds: list[tuple[str, str, str]]) -> list[tuple[str, list[tuple[str, str, str]]]]:
+    """Conditions grouped per chain, L2 before L1 — one panel each.
+
+    L1 latency is ~8x L2's, so a shared axis flattens every L2 condition into
+    the baseline. Separate panels with their own scale keep both readable; the
+    panel titles say which chain, and the figure subtitle says the scales differ.
+    """
+    chains: dict[str, list] = {}
+    for k in conds:
+        chains.setdefault(k[0], []).append(k)
+    return sorted(chains.items(), key=lambda kv: list(CHAIN_LABEL).index(kv[0]) if kv[0] in CHAIN_LABEL else 99)
+
+
+def select(ok: pd.DataFrame, key: tuple[str, str, str]) -> pd.DataFrame:
+    chain, transport, config = key
+    return ok[(ok.chain == chain) & (ok.transport == transport) & (ok.config == config)]
+
+
 def fig_latency(ok: pd.DataFrame, out: Path) -> None:
     """Every run as a dot, the mean and its 95% CI as a bar, per condition."""
-    conds = condition_order(ok)
+    panels = by_chain(condition_order(ok))
     rng = np.random.default_rng(0)  # jitter only; fixed so the figure is reproducible
-    fig, ax = plt.subplots(figsize=(6.4, 3.4))
-    ax.grid(axis="x", visible=False)
-    for i, (chain, transport, config) in enumerate(conds):
-        x = ok[(ok.chain == chain) & (ok.transport == transport) & (ok.config == config)]["latency_ms"]
-        d = describe(x)
-        color = TRANSPORT_COLOR[transport]
-        ax.scatter(
-            i - 0.1 + rng.uniform(-0.15, 0.15, len(x)), x, s=14, color=color, alpha=0.55,
-            edgecolor=SURFACE, linewidth=0.6, zorder=2,
-        )
-        ax.errorbar(
-            i + 0.18, d["mean"], yerr=d["ci95"], fmt="o", color=INK, markersize=4.5,
-            capsize=3, elinewidth=1.2, capthick=1.2, zorder=3,
-        )
-        ax.annotate(
-            f"{d['mean']:.0f} ± {d['ci95']:.0f}", (i + 0.22, d["mean"]), xytext=(4, 0),
-            textcoords="offset points", va="center", fontsize=8, color=INK,
-        )
-    ax.set_xticks(range(len(conds)))
-    ax.set_xticklabels([f"{TRANSPORT_LABEL[t]}\n{c}" for _, t, c in conds])
-    ax.set_xlim(-0.6, len(conds) - 0.1)
-    ax.set_ylim(bottom=0)
-    ax.set_ylabel("t4 − t0 (ms)")
-    chains = sorted(ok["chain"].unique())
-    ax.set_title(f"End-to-end latency per run, {', '.join(chains)}", pad=20)
-    ax.text(
-        0, 1.02, "dots: individual runs · black: mean with 95% CI",
-        transform=ax.transAxes, fontsize=8, color=INK_2, va="bottom",
+    fig, axes = plt.subplots(
+        1, len(panels), figsize=(3.0 + 1.1 * sum(len(c) for _, c in panels), 3.6),
+        gridspec_kw={"width_ratios": [len(c) for _, c in panels]}, squeeze=False,
     )
+    for ax, (chain, conds) in zip(axes[0], panels):
+        ax.grid(axis="x", visible=False)
+        for i, key in enumerate(conds):
+            x = select(ok, key)["latency_ms"]
+            d = describe(x)
+            ax.scatter(
+                i - 0.1 + rng.uniform(-0.15, 0.15, len(x)), x, s=14, color=TRANSPORT_COLOR[key[1]],
+                alpha=0.55, edgecolor=SURFACE, linewidth=0.6, zorder=2,
+            )
+            ax.errorbar(
+                i + 0.18, d["mean"], yerr=d["ci95"], fmt="o", color=INK, markersize=4.5,
+                capsize=3, elinewidth=1.2, capthick=1.2, zorder=3,
+            )
+            ax.annotate(
+                f"{d['mean']:.0f}\n± {d['ci95']:.0f}", (i + 0.22, d["mean"]), xytext=(3, 0),
+                textcoords="offset points", va="center", fontsize=7.5, color=INK,
+            )
+        ax.set_xticks(range(len(conds)))
+        ax.set_xticklabels([f"{TRANSPORT_LABEL[t]}\n{c}" for _, t, c in conds], fontsize=8)
+        ax.set_xlim(-0.55, len(conds) - 0.15)
+        ax.set_ylim(bottom=0)
+        ax.set_title(CHAIN_LABEL.get(chain, chain) + " Sepolia", fontsize=9.5)
+    axes[0][0].set_ylabel("t4 − t0 (ms)")
+    fig.suptitle("End-to-end latency per run", x=0.01, ha="left", fontsize=11, fontweight="bold", color=INK)
+    fig.text(
+        0.01, 0.905, "dots: individual runs · black: mean with 95% CI · panels have separate y scales",
+        fontsize=8, color=INK_2, ha="left",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
     save(fig, out, "fig_latency")
 
 
 def fig_decomposition(ok: pd.DataFrame, out: Path) -> None:
     """Mean latency split into its terms, one stacked bar per condition."""
-    conds = condition_order(ok)
-    fig, ax = plt.subplots(figsize=(6.4, 0.55 * len(conds) + 1.4))
-    ax.grid(axis="y", visible=False)
-    labels = []
-    for row, (chain, transport, config) in enumerate(conds):
-        g = ok[(ok.chain == chain) & (ok.transport == transport) & (ok.config == config)]
-        left = 0.0
-        for slot, (term, _) in enumerate(TERMS):
-            w = g[term].mean()
-            ax.barh(
-                row, w, left=left, height=0.62, color=SLOTS[slot], edgecolor=SURFACE,
-                linewidth=1.5, zorder=2,
-            )
-            if w >= 45:  # label only segments wide enough to hold the text
-                ax.text(left + w / 2, row, f"{w:.0f}", ha="center", va="center", fontsize=7.5, color=INK)
-            left += w
-        ax.text(left + 12, row, f"{left:.0f} ms", va="center", fontsize=8, color=INK)
-        labels.append(f"{TRANSPORT_LABEL[transport]}, {config}")
-    ax.set_yticks(range(len(conds)))
-    ax.set_yticklabels(labels)
-    ax.invert_yaxis()
-    ax.set_xlabel("mean time (ms)")
-    ax.set_xlim(0, ax.get_xlim()[1] * 1.08)
-    ax.set_title("Where the latency goes (mean per term)")
-    handles = [plt.Rectangle((0, 0), 1, 1, color=SLOTS[i]) for i in range(len(TERMS))]
-    ax.legend(
-        handles, [lbl for _, lbl in TERMS], ncol=3, loc="upper left",
-        bbox_to_anchor=(0, -0.22 if len(conds) > 2 else -0.35), handlelength=1, columnspacing=1.2,
+    panels = by_chain(condition_order(ok))
+    n_rows = sum(len(c) for _, c in panels)
+    fig, axes = plt.subplots(
+        len(panels), 1, figsize=(6.6, 0.5 * n_rows + 0.9 * len(panels) + 1.0),
+        gridspec_kw={"height_ratios": [len(c) for _, c in panels]}, squeeze=False,
     )
+    for ax, (chain, conds) in zip(axes[:, 0], panels):
+        ax.grid(axis="y", visible=False)
+        totals = [sum(select(ok, k)[t].mean() for t, _ in TERMS) for k in conds]
+        span = max(totals)
+        for row, key in enumerate(conds):
+            g = select(ok, key)
+            left = 0.0
+            for slot, (term, _) in enumerate(TERMS):
+                w = g[term].mean()
+                ax.barh(
+                    row, w, left=left, height=0.62, color=SLOTS[slot], edgecolor=SURFACE,
+                    linewidth=1.5, zorder=2,
+                )
+                if w >= 0.07 * span:  # label only segments wide enough to hold the text
+                    ax.text(left + w / 2, row, f"{w:.0f}", ha="center", va="center", fontsize=7.5, color=INK)
+                left += w
+            ax.text(left + 0.012 * span, row, f"{left:.0f} ms", va="center", fontsize=8, color=INK)
+        ax.set_yticks(range(len(conds)))
+        ax.set_yticklabels([f"{TRANSPORT_LABEL[t]}, {c}" for _, t, c in conds])
+        ax.invert_yaxis()
+        ax.set_xlim(0, span * 1.14)
+        ax.set_title(CHAIN_LABEL.get(chain, chain) + " Sepolia", fontsize=9.5)
+    axes[-1, 0].set_xlabel("mean time (ms) — panels have separate x scales")
+    fig.suptitle("Where the latency goes (mean per term)", x=0.01, ha="left", fontsize=11,
+                 fontweight="bold", color=INK)
+    handles = [plt.Rectangle((0, 0), 1, 1, color=SLOTS[i]) for i in range(len(TERMS))]
+    fig.legend(
+        handles, [lbl for _, lbl in TERMS], ncol=3, loc="lower left", bbox_to_anchor=(0.01, 0.0),
+        handlelength=1, columnspacing=1.2,
+    )
+    fig.tight_layout(rect=(0, 0.09, 1, 0.97))
     save(fig, out, "fig_decomposition")
 
 
@@ -339,7 +398,8 @@ def fig_device_terms(ok: pd.DataFrame, out: Path) -> None:
     above the rest, and a linear axis would flatten everything else to zero.
     """
     conds = condition_order(ok)
-    fig, axes = plt.subplots(1, 2, figsize=(6.8, 3.2))
+    # Stacked, not side by side: six conditions need the full width for labels.
+    fig, axes = plt.subplots(2, 1, figsize=(6.8, 5.4))
     rng = np.random.default_rng(1)
     for ax, (metric, title, log) in zip(
         axes,
@@ -358,7 +418,7 @@ def fig_device_terms(ok: pd.DataFrame, out: Path) -> None:
         else:
             ax.set_ylim(bottom=0)
         ax.set_xticks(range(len(conds)))
-        ax.set_xticklabels([f"{TRANSPORT_LABEL[t]}\n{c}" for _, t, c in conds], fontsize=7.5)
+        ax.set_xticklabels([cond_label(*k) for k in conds], fontsize=7.5)
         ax.set_title(title, fontsize=9.5)
     fig.suptitle("Device-side terms per run (black line: median)", x=0.01, ha="left", fontsize=11,
                  fontweight="bold", color=INK)
