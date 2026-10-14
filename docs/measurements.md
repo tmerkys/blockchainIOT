@@ -550,3 +550,16 @@ Welch t-test, latency eth vs wifi: t = −2.24, p = 0.030. Network term: t = −
 
 ### Budget after
 Gateway holds **120,341,615,040,646 wei** (~0.000120 ETH) after 66 settles, one open and the 0.00001 ETH deposit.
+
+## M5 controlled config — WiFi power save off (2026-10-14)
+`netplan-wlan0-5G_Gateway_9382C2`: `802-11-wireless.powersave` `default` → **`2` (disable)**.
+Verified with laptop→Pi pings over `wlan0`, 3 s apart (the idle pattern the runner produces):
+
+| powersave | 10 pings, ms |
+|---|---|
+| default (on) | 16, 7, 5, 6, 5, **447, 507, 505**, 7, **479** |
+| disable | 5, 6, 6, 5, 7, 7, 5, 6, 6, 5 |
+
+The 450–510 ms tail on 4/10 pings matches the slow-run cluster in the first M5 WiFi session, so
+the attribution there is confirmed. From this commit the runner records `wifiPowersave` and
+`cpuGovernor` in every row.

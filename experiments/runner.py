@@ -80,7 +80,11 @@ SESSION_COLUMNS = [
     "piCommit",
     "seed",
     "startedUtc",
+    "wifiPowersave",
+    "cpuGovernor",
 ]
+"""`wifiPowersave` and `cpuGovernor` were added after the first M5 pair
+(02b8bb5); those CSVs lack them and ran with NM `default` / `ondemand`."""
 RECORD_COLUMNS = [
     "run", "status", "error", "iface",
     "t0_wall", "t1_wall", "signing_ms", "rtt_ms", "latency_ms", "network_ms", "clock_offset_ms",
@@ -196,7 +200,18 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
         if iface not in addrs:
             raise SystemExit(f"Pi {iface} has no IPv4 address after connect")
 
+    # Pi settings that measurably move the numbers (docs/measurements.md, M5):
+    # WiFi power save delays the reply leg, the governor slows signing.
+    powersave = ssh(
+        "nmcli -g 802-11-wireless.powersave connection show "
+        "\"$(nmcli -g GENERAL.CONNECTION device show wlan0)\""
+    ).strip()
+    governors = set(ssh("cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor").split())
+    say(f"  Pi config: wifi powersave={powersave}, cpu governor={'/'.join(sorted(governors))}")
+
     return {
+        "wifiPowersave": powersave,
+        "cpuGovernor": "/".join(sorted(governors)),
         "commit": commit_id(head, dirty),
         "piCommit": commit_id(pi_head, pi_dirty),
         "chainId": chain_id,
@@ -249,6 +264,8 @@ def run_session(args: argparse.Namespace, meta: dict[str, Any]) -> Path:
         "piCommit": meta["piCommit"],
         "seed": seed,
         "startedUtc": started.isoformat(timespec="seconds"),
+        "wifiPowersave": meta["wifiPowersave"],
+        "cpuGovernor": meta["cpuGovernor"],
     }
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
