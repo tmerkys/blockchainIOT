@@ -1,0 +1,7 @@
+chain,config,a,b,metric,mean_a,mean_b,diff_b_minus_a,t,df,p
+base-sepolia,controlled,eth,wifi,latency_ms,957.452,984.628,27.1758,0.64372,55.6964,0.522399
+base-sepolia,controlled,eth,wifi,network_ms,6.06497,13.4796,7.41467,17.8262,46.746,1.75827e-22
+base-sepolia,controlled,eth,wifi,signing_ms,13.6359,13.4721,-0.163833,-2.30325,57.8639,0.0248782
+base-sepolia,default,eth,wifi,latency_ms,1041.88,1173.15,131.269,2.23599,50.1456,0.0298327
+base-sepolia,default,eth,wifi,network_ms,7.4232,145.719,138.296,4.18721,29.0059,0.000240037
+base-sepolia,default,eth,wifi,signing_ms,34.0547,30.8243,-3.23043,-1.17793,55.7179,0.243831
