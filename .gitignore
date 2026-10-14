@@ -14,3 +14,6 @@ contracts/foundry.lock
 
 # run_batch.py backup copy on the Pi; the laptop CSV is the dataset.
 experiments/device_log/
+
+# Thesis handoff bundle (copied from tracked files; regenerate, do not edit)
+handoff/
