@@ -452,3 +452,51 @@ merge rows from two deployments.
 
 ### Full `forge test` output for ch. 4
 See the table below; regenerate with `forge test -vv` from `contracts/`.
+
+## M5 setup — Pi WiFi link brought up (2026-10-14)
+Not a measurement. Records the network configuration the M5 WiFi condition runs on,
+because it is part of the experimental setup and was changed to make the condition
+possible at all.
+
+### What was wrong
+The Pi's `wlan0` (`D8:3A:DD:1A:23:26`, Broadcom, brcmfmac) could not join the lab
+router's network `5G_Gateway_9382C2` on either radio. Every attempt ended in
+`Authentication with <bssid> timed out` — the AP never answered the 802.11
+Authentication frame. No `ASSOC-REJECT`, no status code, no 4-way-handshake failure.
+
+### Diagnosis, in order
+1. **MAC ACL suspected, ruled out.** The router (ZTE 5G CPE) was factory-reset, which
+   clears any access control list. The failure reproduced unchanged afterwards. The
+   earlier hypothesis that a MAC filter was responsible was wrong.
+2. **Pi radio ruled out.** The same `wlan0` joined a phone hotspot (WPA2-PSK, 2.4 GHz)
+   on the first attempt: associated, 4-way handshake complete, DHCP lease.
+3. **Cause: the router's WPA2/WPA3 transition mode.** Both BSSIDs advertised
+   `WPA2 WPA3` with RSN AKMs `psk sae`. Setting the router to **WPA2-PSK (AES), PMF off**
+   fixed it immediately; the Pi associated to the 5 GHz BSSID on the next attempt.
+   The Pi's profile was already pinned to `wpa-psk`/`rsn`/`ccmp`, so the incompatibility
+   was in how the AP handled a WPA2-only client in transition mode, not in the client.
+
+### Configuration as of this entry
+| | |
+|---|---|
+| Router | ZTE 5G CPE, LAN `192.168.32.1`, factory-reset 2026-10-14 |
+| Router security | **WPA2-PSK, AES, PMF off** (both radios) — changed from WPA2/WPA3 default |
+| SSID | `5G_Gateway_9382C2` — 2.4 GHz BSSID `B8:D4:BC:93:82:C2` (ch 11), 5 GHz BSSID `B8:D4:BC:95:82:C2` (ch 36) |
+| Pi WiFi profile | `netplan-wlan0-5G_Gateway_9382C2`: `wpa-psk`, `rsn`, `ccmp`, PMF disabled, **band locked to 5 GHz (`a`)**, permanent MAC |
+| Pi `eth0` | `192.168.32.63`, route metric 100 |
+| Pi `wlan0` | `192.168.32.64`, route metric 600 |
+| Laptop (gateway) | `192.168.32.54`, **wired Ethernet** — so the WiFi condition varies only the Pi's hop |
+
+5 GHz was chosen over 2.4 GHz deliberately: 2.4 GHz channels 1/3/6/9/11 all carry
+neighbouring networks (`Cgates-*`, `RUT_6A74_2G`, `Internetelis`, `TP-LINK1`, …), while
+5 GHz ch 36 is nearly clear. Pinning the band stops the Pi roaming between radios
+mid-run, which would add a second, unrecorded variable to the condition.
+
+Link sanity, 5 pings Pi → router: `eth0` avg 0.74 ms, `wlan0` avg 3.65 ms (max 7.9 ms),
+0% loss on both.
+
+### Consequence for the runner
+With both links up the kernel routes everything over `eth0` (metric 100 < 600), so a
+"WiFi" run with the cable still connected would silently be an Ethernet run. Each
+condition must take the other interface down, and each CSV row must record the
+interface the traffic actually left by, not the one the condition intended.
