@@ -734,3 +734,30 @@ a never-funded merchant costs +25k on mainnet, +183k on Sepolia.
 - Gas units are identical on both mainnets for this contract, so **the whole L1/L2 cost difference is
   price, not gas**. On testnets it was the reverse (Sepolia's repricing changed the gas, the prices
   were meaningless) — which is exactly why testnet cost figures are not used for H1.
+
+### Identified: Ethereum Sepolia runs Glamsterdam (EIP-8037), mainnet does not (checked 2026-10-14)
+The state-creation repricing seen on Ethereum Sepolia is the **Glamsterdam** network upgrade, active on
+Sepolia since **2026-10-06 13:53:36 UTC** (epoch 353,024; Ethereum Foundation testnet announcement,
+2026-09-17). Our Sepolia RPC reports reth/v2.7.0, the Glamsterdam-ready release. Mainnet and Hoodi
+activation dates were **not set** at the announcement. All M5 L1 runs (2026-10-14) were post-fork.
+
+The operative EIP is **EIP-8037, State Creation Gas Cost Increase** (status *Last Call*, deadline
+2026-11-01, so parameters may still change), with cost per state byte CPSB = 1,530 gas. Checked against
+our own numbers:
+
+| | EIP-8037 spec | measured / simulated here |
+|---|---|---|
+| new account (value to empty account) | 25,000 → 120 × 1,530 = **183,600** | first settle to never-paid merchant, Sepolia − no-surcharge case: **183,588** (mainnet: 24,976) |
+| code deposit | 200 → **1,530** gas/byte, + `GAS_CREATE` 32,000 → 183,600, + hash 6/word | deploy (9,159 B runtime) Sepolia − mainnet: **+12,337,792**; spec predicts ≈ +12,335,000 |
+| new storage slot | 20,000 → 64 × 1,530 = **97,920** | 1-slot probe: +82,623 vs mainnet (= +77,920 from 8037, rest from the same fork's access/intrinsic changes, EIP-8038/EIP-2780 — not final) |
+
+The same fork also carries EIP-2780 (intrinsic gas), EIP-7976 (calldata floor) and EIP-8038 (state-access
+costs), which plausibly account for the remaining ~+11k on a recurring `settle()` (88,329 vs 77,229),
+where no new state is created. Not separated further here.
+
+**Consequence for the H1 cost table:** it prices **mainnet as it was on 2026-10-14, pre-Glamsterdam.**
+When Glamsterdam reaches mainnet, Ethereum L1's one-off and state-creating operations get much dearer
+(deploy ~7x, `open()` ~4x, first settle to a new payee +183.6k gas), while the recurring per-payment
+`settle()` rises ~14%. That only widens the L1 cost gap the table already shows; Base adopts L1 forks on
+its own OP-stack schedule. Ch. 4 should cite the table as pre-Glamsterdam and name this as a threat to
+validity with a known direction.
