@@ -125,8 +125,12 @@ class RedactingFilter(logging.Filter):
             message = record.getMessage()
         except Exception:  # noqa: BLE001 — never let logging crash the gateway
             return True
-        record.msg = redact(message, self.url)
-        record.args = None
+        scrubbed = redact(message, self.url)
+        if scrubbed != message:
+            # Only touch records that leaked: some formatters (uvicorn's access
+            # log) unpack `record.args` and break if it is rewritten.
+            record.msg = scrubbed
+            record.args = ()
         if record.exc_info and not record.exc_text:
             record.exc_text = logging.Formatter().formatException(record.exc_info)
         if record.exc_text:

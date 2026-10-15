@@ -90,6 +90,15 @@ def test_redact_is_a_noop_for_a_keyless_url():
     )
 
 
+def test_filter_leaves_clean_records_untouched():
+    # uvicorn's access formatter unpacks record.args; a clean record must keep them.
+    args = ("127.0.0.1:1", "GET", "/health", "1.1", 200)
+    record = logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1,
+                               '%s - "%s %s HTTP/%s" %d', args, None)
+    assert RedactingFilter(URLS[0]).filter(record)
+    assert record.args == args
+
+
 def test_logging_filter_scrubs_message_args_and_traceback():
     url = URLS[0]
     records: list[str] = []
