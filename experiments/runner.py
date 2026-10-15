@@ -294,7 +294,7 @@ def run_session(args: argparse.Namespace, meta: dict[str, Any]) -> Path:
     }
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
-    path = args.results_dir / f"m5_{meta['chain']}_{args.transport}_{session}.csv"
+    path = args.results_dir / f"{args.experiment}_{meta['chain']}_{args.transport}_{session}.csv"
 
     gap_min, gap_max = (
         (args.gap_min, args.gap_max)
@@ -368,6 +368,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Pi-side HTTP timeout; must outlast the gateway's 120 s receipt wait on L1",
     )
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--experiment",
+        default="m5",
+        choices=["m5", "tp"],
+        help="file prefix. m5: the latency conditions analyze.py pools. tp: the H2 "
+        "back-to-back throughput burst (--gap-min 0 --gap-max 0), which experiments/"
+        "throughput.py reads and analyze.py must not pool with spaced runs",
+    )
     parser.add_argument(
         "--results-dir",
         type=Path,
