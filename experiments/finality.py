@@ -181,13 +181,16 @@ def read_env_var(path: Path, name: str) -> str | None:
     return None
 
 
-def resolve_rpc(chain_id: int, cli: str | None, env_file: Path | None) -> str:
+def resolve_rpc(chain_id: int, cli: str | None, env_file: Path | None, var: str | None = None) -> str:
     if cli:
         return cli
-    if env_file is not None:
-        url = read_env_var(env_file, "RPC_URL")
+    if env_file is not None or var:
+        # --rpc-var names the variable, so a keyed URL never sits on a command line.
+        env_file = env_file or Path(".env")
+        name = var or "RPC_URL"
+        url = read_env_var(env_file, name)
         if not url:
-            raise SystemExit(f"{env_file} has no RPC_URL")
+            raise SystemExit(f"{env_file} has no {name}")
         return url
     if os.environ.get("FINALITY_RPC_URL"):
         return os.environ["FINALITY_RPC_URL"]
@@ -494,6 +497,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--transport", default="na", help="file-name label with --txs")
     p.add_argument("--rpc", help="JSON-RPC URL (default: publicnode for the chain)")
     p.add_argument("--rpc-env", type=Path, help="read RPC_URL from this dotenv file, e.g. .env.sepolia")
+    p.add_argument("--rpc-var", help="read this variable instead of RPC_URL (from --rpc-env, default .env), "
+                   "e.g. BASE_SEPOLIA_DEDICATED_RPC_URL")
     p.add_argument("--poll", type=float, default=DEFAULT_POLL, help="seconds between polls = resolution")
     p.add_argument("--timeout", type=float, default=None, help="seconds per tx (default: per chain)")
     p.add_argument("--idle", type=float, default=DEFAULT_IDLE, help="stop following after this long without growth")
@@ -527,7 +532,7 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"--chain-id {args.chain_id} but {path.name} is on {chain_id}")
         tail = CsvTail(path)
 
-    url = resolve_rpc(chain_id, args.rpc, args.rpc_env)
+    url = resolve_rpc(chain_id, args.rpc, args.rpc_env, args.rpc_var)
     rpc = HttpRpc(url)
     host = rpc_host(url)
     actual = int(rpc.call("eth_chainId", []), 16)

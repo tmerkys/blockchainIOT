@@ -302,3 +302,11 @@ def test_helpers(tmp_path):
     e.write_text("FOO=1\nexport RPC_URL='https://a/b'\n", encoding="utf-8")
     assert read_env_var(e, "RPC_URL") == "https://a/b"
     assert read_env_var(e, "NOPE") is None
+
+
+def test_resolve_rpc_reads_named_variable(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("RPC_URL=https://a.example/x\nDEDICATED=https://b.example/v2/KEY\n", encoding="utf-8")
+    import finality
+    assert finality.resolve_rpc(84532, None, env, "DEDICATED") == "https://b.example/v2/KEY"
+    assert finality.resolve_rpc(84532, None, env) == "https://a.example/x"
