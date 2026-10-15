@@ -107,8 +107,11 @@ RECORD_COLUMNS = [
     "t2", "t3", "t4", "t5", "t6",
     "nonce", "cumulativeAmount", "serviceRef", "txHash", "blockNumber",
     "gasUsed", "effectiveGasPrice", "l1Fee", "l1GasUsed", "l1GasPrice", "gatewayReason",
+    "cpu_sign_ms", "cpu_countersign_ms", "cpu_device_ms",
 ]
-"""Must match `device/run_batch.py:build_record()` key for key; checked per row."""
+"""Must match `device/run_batch.py:build_record()` key for key; checked per row.
+The three `cpu_*` columns were added after the M5 L2/L1 sessions (a0ea140);
+earlier CSVs lack them."""
 
 
 def say(msg: str) -> None:
@@ -291,7 +294,7 @@ def run_session(args: argparse.Namespace, meta: dict[str, Any]) -> Path:
     }
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
-    path = args.results_dir / f"m5_{meta['chain']}_{args.transport}_{session}.csv"
+    path = args.results_dir / f"{args.experiment}_{meta['chain']}_{args.transport}_{session}.csv"
 
     gap_min, gap_max = (
         (args.gap_min, args.gap_max)
@@ -365,6 +368,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Pi-side HTTP timeout; must outlast the gateway's 120 s receipt wait on L1",
     )
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--experiment",
+        default="m5",
+        choices=["m5", "tp"],
+        help="file prefix. m5: the latency conditions analyze.py pools. tp: the H2 "
+        "back-to-back throughput burst (--gap-min 0 --gap-max 0), which experiments/"
+        "throughput.py reads and analyze.py must not pool with spaced runs",
+    )
     parser.add_argument(
         "--results-dir",
         type=Path,

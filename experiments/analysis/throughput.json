@@ -1,0 +1,106 @@
+{
+  "onchain": {
+    "taken_utc": "2026-10-15T15:12:35Z",
+    "prices": "costs_2026-10-14.json (median gas price, ETH/EUR)",
+    "l1_fee": {
+      "blocks": "cost-table blocks (2026-10-14)",
+      "samples": 25,
+      "3of3": 2924585352,
+      "1of1": 1947849915,
+      "ratio_median": 1.5014428618893658,
+      "tx_bytes": {
+        "3of3": 760,
+        "1of1": 440
+      }
+    },
+    "block_limits": {
+      "eth-mainnet": {
+        "gas_limit": 60000000,
+        "block": 26198733,
+        "block_time_s": 12
+      },
+      "base-mainnet": {
+        "gas_limit": 400000000,
+        "block": 52643903,
+        "block_time_s": 2
+      }
+    },
+    "gas": {
+      "eth-mainnet/3of3": {
+        "deploy": 2037870,
+        "open": 167067,
+        "settle_first": 111429,
+        "settle": 77233
+      },
+      "eth-mainnet/1of1": {
+        "deploy": 1702076,
+        "open": 167033,
+        "settle_first": 97129,
+        "settle": 62929
+      },
+      "base-mainnet/3of3": {
+        "deploy": 2037870,
+        "open": 167067,
+        "settle_first": 111429,
+        "settle": 77229
+      },
+      "base-mainnet/1of1": {
+        "deploy": 1702076,
+        "open": 167045,
+        "settle_first": 97117,
+        "settle": 62925
+      },
+      "eth-sepolia/3of3": {
+        "deploy": 14375662,
+        "open": 694887,
+        "settle_first": 284169,
+        "settle": 88333
+      },
+      "eth-sepolia/1of1": {
+        "deploy": 11962114,
+        "open": 694853,
+        "settle_first": 269857,
+        "settle": 74017
+      },
+      "base-sepolia/3of3": {
+        "deploy": 2037870,
+        "open": 167043,
+        "settle_first": 111429,
+        "settle": 77217
+      },
+      "base-sepolia/1of1": {
+        "deploy": 1702076,
+        "open": 167045,
+        "settle_first": 97129,
+        "settle": 62921
+      }
+    },
+    "controls_ok": true
+  },
+  "gateway": {
+    "n": 1000,
+    "machine": "gateway laptop (Windows), one core, perf_counter_ns",
+    "vouchers_per_s": {
+      "3of3": 52.62942806574247,
+      "1of1": 141.41846053391183
+    }
+  },
+  "burst": {
+    "tp_base-sepolia_wifi_20261015T151335Z-82665d.csv": {
+      "file": "tp_base-sepolia_wifi_20261015T151335Z-82665d.csv",
+      "ok": 30,
+      "attempted": 30,
+      "span_s": 59.55570602416992,
+      "settled_per_s": 0.5037300705968439,
+      "mean_interval_s": 1.985190200805664,
+      "latency_mean": 924.3348000000001,
+      "latency_ci95": 41.246964374596374,
+      "spaced_latency_mean": 966.4784666666668,
+      "spaced_n": 60,
+      "welch_p": 0.18366198362454839,
+      "blocks": 30,
+      "max_settles_in_one_block": 1,
+      "block_span": 30
+    }
+  }
+}

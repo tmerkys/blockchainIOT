@@ -33,6 +33,28 @@ offset from the last one lands at a correlated point in the block period, and
 the inclusion term `t4 - t3` stops being the uniform draw it is supposed to be.
 A random gap of at least one block period decorrelates consecutive runs. The
 seed is recorded, so the schedule is reproducible.
+
+**CPU time, as the device-cost figure (M7 fallback).** Without an inline power
+meter, the device's cost per payment is reported as the CPU time this process
+spends on it — a proxy for energy, and stated as one. Read with
+`time.process_time_ns()` (`CLOCK_PROCESS_CPUTIME_ID`: user + system, all
+threads, scheduler-precise — unlike `getrusage`, which is tick-sampled and
+useless at the millisecond scale). Three numbers per run:
+
+  * `cpu_sign_ms` — sensor tick, voucher build, EIP-712 hash and signature;
+    the CPU behind the wall-clock `signing_ms`;
+  * `cpu_countersign_ms` — the merchant's signature. It runs in this process
+    only because the merchant is simulated here (see `run_tick.py`); it is
+    the charging station's work, not the device's, so it is kept apart;
+  * `cpu_device_ms` — the whole device-side operation, tick to parsed reply,
+    *minus* the countersignature: signing, request building, JSON, HTTP send
+    and receive. The ~1 s spent blocked on the gateway costs (almost) no CPU,
+    which is the point of offloading the chain to it.
+
+Not counted, by construction: kernel network work done in softirq context
+(not charged to the process — notably WiFi driver and radio work), the radio's
+own power draw, and the one-off keystore decryption at batch start. Those are
+why this is a lower bound on the device's cost and not an energy measurement.
 """
 
 from __future__ import annotations
@@ -104,6 +126,7 @@ def build_record(
     result: dict[str, Any] | None = None,
     status: str,
     error: str | None = None,
+    cpu: dict[str, int | None] | None = None,
 ) -> dict[str, Any]:
     """Flatten one run into the record the laptop writes as a CSV row.
 
@@ -114,6 +137,7 @@ def build_record(
     could not produce are present and None — every row has the same shape.
     """
     result = result or {}
+    cpu = cpu or {}
     t2, t4, t6 = result.get("t2"), result.get("t4"), result.get("t6")
     t0_mono = signed.event.t0_mono_ns if signed is not None else None
 
@@ -154,7 +178,27 @@ def build_record(
         "l1GasUsed": result.get("l1GasUsed"),
         "l1GasPrice": result.get("l1GasPrice"),
         "gatewayReason": result.get("reason"),
+        # device CPU time, ms — see the module docstring
+        "cpu_sign_ms": ns_to_ms(cpu.get("sign")),
+        "cpu_countersign_ms": ns_to_ms(cpu.get("countersign")),
+        "cpu_device_ms": ns_to_ms(cpu.get("device")),
     }
+
+
+class CpuTimedCountersign:
+    """Wraps the merchant countersigner and accumulates the CPU it uses, so
+    the device's figure can exclude work that belongs to another party."""
+
+    def __init__(self, countersign: Any) -> None:
+        self.countersign = countersign
+        self.ns = 0
+
+    def __call__(self, voucher: Any) -> str:
+        c0 = time.process_time_ns()
+        try:
+            return self.countersign(voucher)
+        finally:
+            self.ns += time.process_time_ns() - c0
 
 
 def say(msg: str) -> None:
@@ -196,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     countersign, _ = merchant_countersigner(
         env["MERCHANT_PRIVATE_KEY"], config.chain_id, config.verifying_contract
     )
+    countersign = CpuTimedCountersign(countersign)
     transport = HttpTransport(gateway_url, countersign=countersign, timeout=args.timeout)
 
     state = transport.channel_state(config.channel)
@@ -223,12 +268,16 @@ def main(argv: list[str] | None = None) -> int:
         iface = route_iface(gateway_host)
         signed = marks = result = None
         error = None
+        cpu: dict[str, int | None] = {}
         if args.expect_iface and iface != args.expect_iface:
             status = STATUS_WRONG_IFACE
             error = f"route to {gateway_host} leaves by {iface}, expected {args.expect_iface}"
         else:
+            countersign.ns = 0
+            c0 = time.process_time_ns()
             try:
                 signed = agent.handle_event(meter.tick())
+                cpu["sign"] = time.process_time_ns() - c0
                 result = transport.send(signed)
                 status = classify(result)
             except GatewayError as exc:
@@ -237,6 +286,10 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:  # noqa: BLE001 — a row, not a crash
                 status = STATUS_ERROR
                 error = f"{type(exc).__name__}: {exc}"
+            c_end = time.process_time_ns()
+            if signed is not None:
+                cpu["countersign"] = countersign.ns
+                cpu["device"] = (c_end - c0) - countersign.ns
             marks = transport.last_marks if signed is not None else None
             # last_marks persists across sends; only trust it if this send stamped it.
             if marks is not None and signed is not None and marks.t_send_ns < signed.t1_ns:
@@ -244,7 +297,7 @@ def main(argv: list[str] | None = None) -> int:
 
         record = build_record(
             run=run, iface=iface, signed=signed, marks=marks, result=result,
-            status=status, error=error,
+            status=status, error=error, cpu=cpu,
         )
         line = json.dumps(record, separators=(",", ":"))
         print(line, flush=True)
