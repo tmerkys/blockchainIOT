@@ -99,10 +99,20 @@ TRANSPORT_COLOR = {"eth": SLOTS[0], "wifi": SLOTS[1], "ble": SLOTS[2]}
 # --- loading ---------------------------------------------------------------
 
 
-def load(results_dir: Path) -> pd.DataFrame:
-    files = sorted(glob.glob(str(results_dir / "m5_*.csv")))
+def load(results_dir: Path, prefix: str = "m5", required: bool = True) -> pd.DataFrame | None:
+    """Every `<prefix>_*.csv` the runner wrote, with the derived columns.
+
+    `m5` feeds summary.csv / tests.csv / the figures — the published results-v1
+    tables. `v2` holds the sessions run after results-v1 (dedicated RPC and its
+    same-day publicnode control, L1 with the finality observer); they only feed
+    the separate rpc_* and finality_* outputs, so the published rows can never
+    move because a later session landed in the same condition.
+    """
+    files = sorted(glob.glob(str(results_dir / f"{prefix}_*.csv")))
     if not files:
-        raise SystemExit(f"no m5_*.csv in {results_dir}")
+        if not required:
+            return None
+        raise SystemExit(f"no {prefix}_*.csv in {results_dir}")
     frames = []
     for f in files:
         d = pd.read_csv(f)
@@ -478,16 +488,28 @@ def _fin_key(frame: pd.DataFrame) -> pd.Series:
 
 
 def attach_finality(df: pd.DataFrame, results_dir: Path) -> pd.DataFrame:
-    """Add FIN_METRICS columns to the m5_ rows (NaN where no fin_ row observed it)."""
-    df = df.copy()
-    for m in FIN_METRICS:
-        df[m] = np.nan
+    """One copy of the observed rows per finality observer, with FIN_METRICS.
+
+    Several observers can watch the same transactions (e.g. the gateway's
+    provider and publicnode side by side). They are kept apart, keyed by the
+    observer's RPC host in `observerHost`, never merged: how much the provider
+    shifts the reading is itself a result. Rows no observer saw are dropped.
+    """
     files = sorted(glob.glob(str(results_dir / "fin_*.csv")))
     if not files:
-        return df
-    fin = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
-    fin = fin[fin["status"] != "reorged"].copy()
-    # Several observers on one tx: prefer one that saw it finalized.
+        return df.iloc[0:0].assign(**{m: np.nan for m in FIN_METRICS}, observerHost=None)
+    fin_all = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+    fin_all = fin_all[fin_all["status"] != "reorged"]
+    out = []
+    for host, fin in fin_all.groupby("rpcHost"):
+        out.append(_attach_one_observer(df, fin.copy()).assign(observerHost=host))
+    return pd.concat(out, ignore_index=True)
+
+
+def _attach_one_observer(df: pd.DataFrame, fin: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    # One observer process per session; a tx seen twice by the same host keeps
+    # the row that saw it finalized.
     fin["_rank"] = (fin["status"] != "finalized").astype(int)
     fin["_key"] = _fin_key(fin)
     fin = fin.sort_values(["_rank", "t_finalized"]).drop_duplicates("_key")
@@ -499,13 +521,16 @@ def attach_finality(df: pd.DataFrame, results_dir: Path) -> pd.DataFrame:
     df["safe_ms"] = (key.map(by_key_safe).astype(float) - df["t4"]) * 1000
     df["finalized_ms"] = (key.map(by_key_fin).astype(float) - df["t4"]) * 1000
     df["finality_ms"] = df["latency_ms"] + df["finalized_ms"]
-    return df
+    return df[df["safe_ms"].notna() | df["finalized_ms"].notna()]
+
+
+FIN_KEYS = KEYS + ["observerHost"]
 
 
 def summarise_finality(df: pd.DataFrame) -> pd.DataFrame:
     """Same long-form rows as summarise(), for FIN_METRICS; none without fin_ data."""
     rows = []
-    for key, g in df.groupby(KEYS):
+    for key, g in df.groupby(FIN_KEYS):
         ok = g[g["status"] == "ok"]
         counts = g["status"].value_counts().to_dict()
         for metric in FIN_METRICS:
@@ -513,7 +538,7 @@ def summarise_finality(df: pd.DataFrame) -> pd.DataFrame:
                 continue  # condition not observed by finality.py
             rows.append(
                 {
-                    **dict(zip(KEYS, key)),
+                    **dict(zip(FIN_KEYS, key)),
                     "metric": metric,
                     **describe(ok[metric]),
                     "attempted": len(g),
@@ -526,25 +551,28 @@ def summarise_finality(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def welch_finality(df: pd.DataFrame) -> pd.DataFrame:
-    """L2 vs L1, within (transport, config), on runs observed to finalized on both chains."""
+    """L2 vs L1 within (transport, config), per pair of observers that saw both
+    chains' runs finalized; `a`/`b` name chain@observer host."""
     ok = df[df["status"] == "ok"]
     rows: list[dict] = []
     for (transport, config), g in ok.groupby(["transport", "config"]):
-        a = g[(g["chain"] == "base-sepolia") & g["finalized_ms"].notna()]
-        b = g[(g["chain"] == "sepolia") & g["finalized_ms"].notna()]
-        if len(a) > 1 and len(b) > 1:
-            rows += _welch_rows(a, b, "base-sepolia", "sepolia", transport, config, FIN_METRICS)
+        l2 = g[(g["chain"] == "base-sepolia") & g["finalized_ms"].notna()]
+        l1 = g[(g["chain"] == "sepolia") & g["finalized_ms"].notna()]
+        for ha, a in l2.groupby("observerHost"):
+            for hb, b in l1.groupby("observerHost"):
+                if len(a) > 1 and len(b) > 1:
+                    rows += _welch_rows(a, b, f"base-sepolia@{ha}", f"sepolia@{hb}",
+                                        transport, config, FIN_METRICS)
     return pd.DataFrame(rows)
 
 
-def print_finality(summary: pd.DataFrame) -> None:
-    fin = summary[summary["metric"].isin(FIN_METRICS)]
+def print_finality(fin: pd.DataFrame) -> None:
     if fin.empty:
         return
     print("\n== Time to finality (ms; t_safe/t_finalized first seen, late by <= one poll)")
     for _, r in fin.iterrows():
         print(
-            f"  {r.chain:<13}{r.transport:<6}{r.config:<11}{r.metric:<13} n={int(r.n):<3}"
+            f"  {r.chain:<13}{r.transport:<6}{r.config:<11}{str(r.observerHost):<34}{r.metric:<13} n={int(r.n):<3}"
             f"{r['mean']:>11.0f} ± {r.ci95:>7.0f}  median {r['median']:>9.0f}"
             f"  [{r['min']:.0f}, {r['max']:.0f}]"
         )
@@ -750,18 +778,23 @@ def main(argv: list[str] | None = None) -> int:
     tests = welch(df)
     print_summary(summary, tests)
 
-    # finality (experiments/finality.py): appended rows only, existing ones untouched
-    df = attach_finality(df, args.results)
-    fin_summary, fin_tests = summarise_finality(df), welch_finality(df)
-    if not fin_summary.empty:
-        summary = pd.concat([summary, fin_summary], ignore_index=True)
-    if not fin_tests.empty:
-        tests = pd.concat([tests, fin_tests], ignore_index=True)
-    print_finality(summary)
-
     args.out.mkdir(parents=True, exist_ok=True)
     summary.to_csv(args.out / "summary.csv", index=False, float_format="%.4f")
     tests.to_csv(args.out / "tests.csv", index=False, float_format="%.6g")
+
+    # Sessions after results-v1 (`v2_` prefix) feed only the outputs below.
+    v2 = load(args.results, "v2", required=False)
+    if v2 is not None:
+        df_all = pd.concat([df_all, v2], ignore_index=True)
+
+    # finality (experiments/finality.py): per observer, separate files
+    fin_rows = attach_finality(df_all, args.results)
+    fin_summary, fin_tests = summarise_finality(fin_rows), welch_finality(fin_rows)
+    print_finality(fin_summary)
+    if not fin_summary.empty:
+        fin_summary.to_csv(args.out / "finality_summary.csv", index=False, float_format="%.4f")
+    if not fin_tests.empty:
+        fin_tests.to_csv(args.out / "finality_tests.csv", index=False, float_format="%.6g")
 
     # exp/rpc: separate outputs, only when a second provider is in the data.
     groups = rpc_groups(df_all)

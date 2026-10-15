@@ -398,10 +398,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--experiment",
         default="m5",
-        choices=["m5", "tp"],
-        help="file prefix. m5: the latency conditions analyze.py pools. tp: the H2 "
+        choices=["m5", "tp", "v2"],
+        help="file prefix. m5: the latency conditions analyze.py pools (results-v1). tp: the H2 "
         "back-to-back throughput burst (--gap-min 0 --gap-max 0), which experiments/"
-        "throughput.py reads and analyze.py must not pool with spaced runs",
+        "throughput.py reads and analyze.py must not pool with spaced runs. v2: sessions after "
+        "results-v1 (dedicated RPC + control, L1 finality); analyze.py reads them only for "
+        "rpc_* and finality_* outputs, never for summary.csv/tests.csv",
     )
     parser.add_argument(
         "--results-dir",
