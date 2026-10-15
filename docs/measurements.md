@@ -761,3 +761,51 @@ When Glamsterdam reaches mainnet, Ethereum L1's one-off and state-creating opera
 `settle()` rises ~14%. That only widens the L1 cost gap the table already shows; Base adopts L1 forks on
 its own OP-stack schedule. Ch. 4 should cite the table as pre-Glamsterdam and name this as a threat to
 validity with a known direction.
+
+## M5 + M7 fallback — device CPU time, Base Sepolia, WiFi, controlled, N=30 (2026-10-15)
+- Commit **c602b61** both machines (adds per-run CPU time to `device/run_batch.py`).
+  Same contract `0xb746…4bF9`, channel `0x69af…20D2`, nonces 129–158. Runner defaults (gap 2–4 s).
+- Pi config, per row: WiFi powersave **disable**, governor **performance** (re-set by hand after a
+  reboot; verified 4/4 cores before the session), `iface` wlan0 in all rows.
+- Data: `m5_base-sepolia_wifi_20261015T145753Z-5c1e14.csv` — **30/30 ok**, 0 runs with network > 100 ms.
+- Why: no USB power meter, so M7 falls back to CPU time as the device-cost figure — **a proxy for
+  energy, stated as a limitation, not an energy measurement.**
+
+### Device CPU time per payment (mean ± 95% CI, n = 30, ms)
+| | mean ± CI | median | min | max |
+|---|---|---|---|---|
+| `cpu_sign_ms` — tick + voucher build + EIP-712 hash + sign | **13.50 ± 0.13** | 13.46 | 13.21 | 15.10 |
+| `cpu_device_ms` — whole device-side operation, excl. merchant | **16.17 ± 0.16** | 16.10 | 15.87 | 18.31 |
+| `cpu_countersign_ms` — merchant signature (simulated on the Pi) | 13.18 ± 0.06 | 13.18 | 12.91 | 13.56 |
+
+Clock: `CLOCK_PROCESS_CPUTIME_ID` via `time.process_time_ns()` (user + system, all threads).
+
+### Reading this row
+- **Signing is CPU-bound and is most of the device's work.** CPU time for signing equals its wall
+  time (median ratio 1.003 vs `signing_ms`), and is 83% of the device's CPU per payment. The rest —
+  request building, JSON, the HTTP exchange — is ~2.7 ms (median). The ~1 s the device spends
+  waiting for the gateway's receipt costs it effectively no CPU: the chain work sits on the gateway.
+- **The merchant's signature costs the same as the device's** (13.2 vs 13.5 ms); in this prototype it
+  runs on the Pi, so the Pi's actual CPU per payment is ~29.3 ms. Reported separately because in a
+  deployment it is the charging station's work.
+- **What this does not count:** kernel network work in softirq context (WiFi driver), the radio's
+  own power, idle/baseline draw, the one-off keystore decryption at batch start. A lower bound on
+  device effort, not joules. No CPU-time→energy conversion is made here (no measured power figure).
+
+### Latency in this session, and pooling
+Latency 948.3 ms mean (sd 195.4) vs 984.6 in the 2026-10-14 WiFi controlled session: Welch p = 0.46
+(signing p = 0.70, network p = 0.10). Same condition, so `analyze.py` pools both sessions:
+**L2 WiFi controlled is now n = 60: 966.5 ± 48.3 ms** (median 935.1). Knock-on in `tests.csv`:
+eth vs wifi latency p = 0.80 (was 0.52); wire penalty 6.9 ms, p = 3.6e-32; signing eth vs wifi
+p = 0.11 (was 0.025 — that small difference does not hold up); L1 − L2 on WiFi +7.8 s, p = 1.5e-12.
+
+### Clock note
+Per-session mean clock-offset diagnostic **+487.6 ms** (previous sessions +2.1 to +7.3 ms). Cause:
+the **laptop**, not the Pi — Pi chrony locked to time.cloudflare.com (system time 7 µs off), laptop
+w32time last synced ~4 h earlier and measured **−0.48 s** against time.cloudflare.com right after
+the session (`w32tm /stripchart`). No reported number crosses machines (latency is device-monotonic
+minus a gateway-internal span), so latency, signing, network and CPU figures are unaffected; only the
+offset diagnostic moved. Before the next session: `w32tm /resync` from an elevated shell.
+
+### Budget after
+Gateway holds **77,624,533,793,983 wei** (~0.000078 ETH) on Base Sepolia.

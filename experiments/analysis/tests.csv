@@ -1,7 +1,7 @@
 scope,config,a,b,metric,mean_a,mean_b,diff_b_minus_a,t,df,p
-base-sepolia,controlled,eth,wifi,latency_ms,957.452,984.628,27.1758,0.64372,55.6964,0.522399
-base-sepolia,controlled,eth,wifi,network_ms,6.06497,13.4796,7.41467,17.8262,46.746,1.75827e-22
-base-sepolia,controlled,eth,wifi,signing_ms,13.6359,13.4721,-0.163833,-2.30325,57.8639,0.0248782
+base-sepolia,controlled,eth,wifi,latency_ms,957.452,966.478,9.02643,0.251153,72.1812,0.802409
+base-sepolia,controlled,eth,wifi,network_ms,6.06497,12.9703,6.90533,18.5625,87.9504,3.59902e-32
+base-sepolia,controlled,eth,wifi,signing_ms,13.6359,13.4981,-0.1378,-1.62198,87.4301,0.108409
 base-sepolia,default,eth,wifi,latency_ms,1041.88,1173.15,131.269,2.23599,50.1456,0.0298327
 base-sepolia,default,eth,wifi,network_ms,7.4232,145.719,138.296,4.18721,29.0059,0.000240037
 base-sepolia,default,eth,wifi,signing_ms,34.0547,30.8243,-3.23043,-1.17793,55.7179,0.243831
@@ -12,7 +12,7 @@ eth,controlled,base-sepolia,sepolia,latency_ms,957.452,8169.89,7212.44,10.1333,2
 eth,controlled,base-sepolia,sepolia,inclusion_ms,214.696,7457.98,7243.28,10.178,29.0599,4.3159e-11
 eth,controlled,base-sepolia,sepolia,build_ms,709.677,676.583,-33.0934,-1.62264,49.4161,0.111029
 eth,controlled,base-sepolia,sepolia,gasUsed,77289.8,88359.8,11070,2913.3,57.5744,1.70618e-150
-wifi,controlled,base-sepolia,sepolia,latency_ms,984.628,8736.35,7751.73,11.688,29.1417,1.60276e-12
-wifi,controlled,base-sepolia,sepolia,inclusion_ms,240.398,8009.03,7768.63,11.7012,29.1263,1.57115e-12
-wifi,controlled,base-sepolia,sepolia,build_ms,704.1,682.36,-21.7393,-1.33022,47.1534,0.189843
-wifi,controlled,base-sepolia,sepolia,gasUsed,77290.2,88378.2,11088,3729.59,58,1.00318e-157
+wifi,controlled,base-sepolia,sepolia,latency_ms,966.478,8736.35,7769.88,11.7219,29.0769,1.54084e-12
+wifi,controlled,base-sepolia,sepolia,inclusion_ms,234.323,8009.03,7774.7,11.7166,29.0635,1.56761e-12
+wifi,controlled,base-sepolia,sepolia,build_ms,692.475,682.36,-10.1152,-0.618036,50.1787,0.539347
+wifi,controlled,base-sepolia,sepolia,gasUsed,77288.4,88378.2,11089.8,4081.47,66.2826,1.04407e-180

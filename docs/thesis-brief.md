@@ -3,7 +3,8 @@
 Handoff document for writing the thesis *"Blokų grandinės pagrindu veikiantys finansiniai
 atsiskaitymai tarp IoT įrenginių"* (blockchain-based financial settlement between IoT devices).
 Prepared 2026-10-14 from the prototype repository (branch `develop`, last data commit `a0ea140`,
-cost table `b2bdc48`, EIP-8037 note `86d1ec1`).
+cost table `b2bdc48`, EIP-8037 note `86d1ec1`). Updated 2026-10-15: device CPU-time session
+(code `c602b61`), L2 WiFi controlled pooled to n = 60.
 
 This brief is the map; the files listed in §10 are the territory. Where they disagree, **the files
 win**, and the disagreement is a bug in this brief.
@@ -107,7 +108,8 @@ term** (tested against ±500 ms injected skew). Decomposition terms:
 
 - Runner `experiments/runner.py` (laptop) drives `device/run_batch.py` (Pi) over SSH.
 - **Conditions:** transport {Ethernet, WiFi} × chain {L2 Base Sepolia, L1 Ethereum Sepolia} × Pi config
-  {default, controlled}. N = 30 per condition; 240 settled runs in the dataset, **0 failures**.
+  {default, controlled}. N = 30 per condition (L2 WiFi controlled: n = 60, two sessions on
+  consecutive days, pooled — Welch p = 0.46 between them); 270 settled runs, **0 failures**.
 - **Link isolation:** the Pi's other interface is taken down for each session (both links share one
   /24, Ethernet wins on route metric, so a "WiFi" run with the cable in would silently be Ethernet).
   The route is checked before every tick and recorded per row (`iface`).
@@ -115,7 +117,7 @@ term** (tested against ±500 ms injected skew). Decomposition terms:
   block period, so each run lands at an uncorrelated point in the block cycle. Seed recorded.
 - **Failure handling:** every attempt is a CSV row with a `status`; only `ok` rows enter statistics.
   Mined-but-reverted is a distinct status (never counted as success).
-- **Statistics:** mean, sd, 95% CI as t-interval on the mean (n = 30), median, min, max; Welch t-tests
+- **Statistics:** mean, sd, 95% CI as t-interval on the mean, median, min, max; Welch t-tests
   (unequal variances) between transports within a chain/config, and between chains within a
   transport/config.
 - **Reproducibility:** every row carries both machines' git commit; same commit enforced on both;
@@ -128,7 +130,7 @@ term** (tested against ±500 ms injected skew). Decomposition terms:
 
 ## 4. Results — latency (H1)
 
-All values: mean ± 95% CI, n = 30, ms. Source: `experiments/analysis/summary.csv`, `tests.csv`.
+All values: mean ± 95% CI, ms; n = 30 except L2 WiFi controlled, n = 60. Source: `experiments/analysis/summary.csv`, `tests.csv`.
 
 ### 4.1 Main table
 | Chain | Transport | Config | **t4 − t0** | median | signing | network | build+broadcast | block inclusion |
@@ -136,24 +138,24 @@ All values: mean ± 95% CI, n = 30, ms. Source: `experiments/analysis/summary.cs
 | L2 Base | Ethernet | default | 1041.9 ± 66.0 | 1005.6 | 34.1 | 7.4 | 735.9 | 233.9 |
 | L2 Base | WiFi | default | 1173.2 ± 100.3 | 1102.8 | 30.8 | 145.7 | 741.3 | 225.4 |
 | L2 Base | Ethernet | controlled | **957.5 ± 54.5** | 981.5 | 13.6 | 6.1 | 709.7 | 214.7 |
-| L2 Base | WiFi | controlled | **984.6 ± 67.0** | 984.6 | 13.5 | 13.5 | 704.1 | 240.4 |
+| L2 Base | WiFi | controlled | **966.5 ± 48.3** | 935.1 | 13.5 | 13.0 | 692.5 | 234.3 |
 | L1 Ethereum | Ethernet | controlled | **8169.9 ± 1454.7** | 8400.3 | 13.6 | 8.5 | 676.6 | 7458.0 |
 | L1 Ethereum | WiFi | controlled | **8736.4 ± 1354.8** | 8695.5 | 13.5 | 18.3 | 682.4 | 8009.0 |
 
 ### 4.2 Findings
-1. **L2 end-to-end latency ≈ 1 s** (controlled: 957.5 / 984.6 ms) — "low seconds", H1 latency supported.
+1. **L2 end-to-end latency ≈ 1 s** (controlled: 957.5 Ethernet / 966.5 WiFi ms) — "low seconds", H1 latency supported.
 2. **L1 is ~8.5× slower** (+7.2 s Ethernet, p = 4.7e-11; +7.8 s WiFi, p = 1.6e-12). **The entire
    difference is block inclusion**; gateway build+broadcast does not differ between chains (p = 0.11 /
-   0.19). Verified against block timestamps: all 60 L1 transactions were included in the *next* slot
+   0.54). Verified against block timestamps: all 60 L1 transactions were included in the *next* slot
    (broadcast→block 0.8–13.4 s, mean 6.5 s ≈ half a 12 s slot); receipt seen ~1.2 s after the block.
 3. **Where the time goes on L2 (controlled):** ~70% gateway↔public-RPC round trips (build+broadcast
-   ≈ 705 ms), ~23% block inclusion (≈ 215–240 ms, about half Base's 2 s block period), ~2% signing,
+   ≈ 690–710 ms), ~23% block inclusion (≈ 215–235 ms, about half Base's 2 s block period), ~2% signing,
    ~1% network. **The chain is not the L2 bottleneck; the public RPC endpoint is.** On L1 the slot
    time dominates (~90%).
-4. **Transport (Ethernet vs WiFi) does not matter end-to-end** under controlled config: L2 p = 0.52,
-   L1 p = 0.56. On the wire WiFi costs ~7 ms more (13.5 vs 6.1 ms, p = 1.8e-22) — real but invisible
+4. **Transport (Ethernet vs WiFi) does not matter end-to-end** under controlled config: L2 p = 0.80,
+   L1 p = 0.56. On the wire WiFi costs ~7 ms more (13.0 vs 6.1 ms, p = 3.6e-32) — real but invisible
    against block and RPC time.
-5. Comparison: Kurt et al. (2021) report 2.6 s over WiFi; our L2 WiFi figure is 0.98 s **with an
+5. Comparison: Kurt et al. (2021) report 2.6 s over WiFi; our L2 WiFi figure is 0.97 s **with an
    on-chain settlement per payment**. (Different systems — cite, don't equate.)
 
 ### 4.3 Device-configuration finding (default vs controlled)
@@ -169,6 +171,24 @@ All values: mean ± 95% CI, n = 30, ms. Source: `experiments/analysis/summary.cs
   disabling it costs energy (→ M7).
 - The merchant countersignature (made on the Pi in this prototype) costs the same as the device
   signature (13.4 ms controlled, ~30 ms default) — the device effectively signs twice per payment.
+
+### 4.4 Device CPU time per payment (M7 fallback — a proxy, not energy)
+Source: `summary.csv` metrics `cpu_*`; one session, L2 WiFi controlled, n = 30, 2026-10-15, commit c602b61.
+Measured with the process CPU clock (`CLOCK_PROCESS_CPUTIME_ID`, user + system).
+
+| Device-side work | CPU ms, mean ± 95% CI | median |
+|---|---|---|
+| Sign (tick + voucher build + EIP-712 hash + ECDSA) | **13.50 ± 0.13** | 13.46 |
+| Whole device-side operation, tick → parsed reply (excl. merchant) | **16.17 ± 0.16** | 16.10 |
+| Merchant countersignature (simulated on the Pi; not the device's work) | 13.18 ± 0.06 | 13.18 |
+
+- Signing is CPU-bound (CPU time = wall time, ratio 1.003) and is ~83% of the device's CPU per payment;
+  request/JSON/HTTP add ~2.7 ms. The ~1 s spent waiting for the on-chain receipt costs the device
+  effectively no CPU — the chain work is on the gateway.
+- With the merchant simulated on the Pi, the Pi's actual CPU per payment is ~29.3 ms.
+- **Must be presented as a proxy for device energy** (no power meter). It omits kernel network work
+  (WiFi driver softirq), radio power, idle draw and the one-off key decryption: a lower bound on
+  device effort. Do not convert to joules with a literature wattage.
 
 ---
 
@@ -289,17 +309,20 @@ Glamsterdam on mainnet would raise L1 costs and widen the gap (known direction).
 9. **Network term ~2–5 ms higher in L1 sessions** than L2 controlled sessions on the same links (same
    config, ~30 min later) — ambient load; negligible vs 8 s.
 10. **Clock**: no reported number crosses machines; per-session mean offset diagnostic −63 to +7.3 ms
-    (the −63 ms is the power-save artefact in default WiFi; all other sessions +2.1 to +7.3 ms).
+    (the −63 ms is the power-save artefact in default WiFi; all other 2026-10-14 sessions +2.1 to
+    +7.3 ms). The 2026-10-15 session shows +487.6 ms: the laptop's Windows clock had drifted 0.48 s
+    from NTP (Pi chrony in sync). Diagnostic only — no reported figure uses it.
 11. **Simulated sensor** (kWh meter), not a real charger.
-12. **Bluetooth and energy not yet measured** (§9).
+12. **Bluetooth not yet measured; energy only as a CPU-time proxy** (§4.4, §9) — no power meter.
 
 ---
 
 ## 9. Pending — placeholders, do not fill from literature
 - **Bluetooth (BLE) transport** — blocked on a USB Bluetooth adapter for the gateway laptop. Planned:
   Pi as BLE GATT peripheral, gateway as central (bleak). Will add L2/L1 × BLE rows to §4.1.
-- **M7 energy** — no USB power meter yet. Fallback: CPU time as proxy, *stated explicitly as a
-  limitation*. Relevant terms: signing ×2 per payment (§4.3), power-save trade-off.
+- **M7 energy in joules** — no USB power meter. The CPU-time fallback is measured (§4.4) and must be
+  stated as a limitation. Still unmeasured: actual energy, and the energy cost of disabling WiFi
+  power save (§4.3).
 - **H3** regulatory analysis (MiCA / PSD2) — author.
 - **Throughput under load** for H2 (concurrent devices/vouchers) — not run; currently argued from
   per-settlement latency and channel amortisation.
