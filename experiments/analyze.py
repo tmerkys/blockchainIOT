@@ -260,6 +260,104 @@ def print_summary(summary: pd.DataFrame, tests: pd.DataFrame) -> None:
             )
 
 
+# --- finality (experiments/finality.py) ------------------------------------
+# Separate from the M5 metrics on purpose: these rows are appended after the
+# existing summary/tests rows and never change them. A fin_*.csv row is joined
+# to the m5_ row it observed on (chainId, contract, channel, nonce, txHash).
+# Its t_safe / t_finalized are laptop time.time(), the clock of t4, so
+#   safe_ms      = t_safe - t4        (gateway clock only)
+#   finalized_ms = t_finalized - t4   (gateway clock only)
+#   finality_ms  = latency_ms + finalized_ms   (sensor event -> final; one device
+#                  span + one gateway span, no cross-machine instant, as sealed_ms)
+# Resolution: each first observation is late by up to one poll interval (the
+# fin_ row's pollInterval_s); see finality.py.
+
+FIN_METRICS = ["safe_ms", "finalized_ms", "finality_ms"]
+FIN_KEY = ["chainId", "contract", "channel", "nonce", "txHash"]
+
+
+def _fin_key(frame: pd.DataFrame) -> pd.Series:
+    nonce = pd.to_numeric(frame["nonce"], errors="coerce").astype("Int64").astype(str)
+    return (
+        frame["chainId"].astype(str) + "|" + frame["contract"].astype(str).str.lower() + "|"
+        + frame["channel"].astype(str).str.lower() + "|" + nonce + "|"
+        + frame["txHash"].astype(str).str.lower()
+    )
+
+
+def attach_finality(df: pd.DataFrame, results_dir: Path) -> pd.DataFrame:
+    """Add FIN_METRICS columns to the m5_ rows (NaN where no fin_ row observed it)."""
+    df = df.copy()
+    for m in FIN_METRICS:
+        df[m] = np.nan
+    files = sorted(glob.glob(str(results_dir / "fin_*.csv")))
+    if not files:
+        return df
+    fin = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+    fin = fin[fin["status"] != "reorged"].copy()
+    # Several observers on one tx: prefer one that saw it finalized.
+    fin["_rank"] = (fin["status"] != "finalized").astype(int)
+    fin["_key"] = _fin_key(fin)
+    fin = fin.sort_values(["_rank", "t_finalized"]).drop_duplicates("_key")
+    # A finalized time only counts on a finalized row (not timeout/interrupted).
+    t_fin = fin["t_finalized"].where(fin["status"] == "finalized")
+    by_key_safe = dict(zip(fin["_key"], fin["t_safe"]))
+    by_key_fin = dict(zip(fin["_key"], t_fin))
+    key = _fin_key(df)
+    df["safe_ms"] = (key.map(by_key_safe).astype(float) - df["t4"]) * 1000
+    df["finalized_ms"] = (key.map(by_key_fin).astype(float) - df["t4"]) * 1000
+    df["finality_ms"] = df["latency_ms"] + df["finalized_ms"]
+    return df
+
+
+def summarise_finality(df: pd.DataFrame) -> pd.DataFrame:
+    """Same long-form rows as summarise(), for FIN_METRICS; none without fin_ data."""
+    rows = []
+    for key, g in df.groupby(KEYS):
+        ok = g[g["status"] == "ok"]
+        counts = g["status"].value_counts().to_dict()
+        for metric in FIN_METRICS:
+            if ok[metric].isna().all():
+                continue  # condition not observed by finality.py
+            rows.append(
+                {
+                    **dict(zip(KEYS, key)),
+                    "metric": metric,
+                    **describe(ok[metric]),
+                    "attempted": len(g),
+                    "failed": len(g) - counts.get("ok", 0),
+                    "sessions": g["session"].nunique(),
+                    "commits": ";".join(sorted(g["commit"].astype(str).str[:7].unique())),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def welch_finality(df: pd.DataFrame) -> pd.DataFrame:
+    """L2 vs L1, within (transport, config), on runs observed to finalized on both chains."""
+    ok = df[df["status"] == "ok"]
+    rows: list[dict] = []
+    for (transport, config), g in ok.groupby(["transport", "config"]):
+        a = g[(g["chain"] == "base-sepolia") & g["finalized_ms"].notna()]
+        b = g[(g["chain"] == "sepolia") & g["finalized_ms"].notna()]
+        if len(a) > 1 and len(b) > 1:
+            rows += _welch_rows(a, b, "base-sepolia", "sepolia", transport, config, FIN_METRICS)
+    return pd.DataFrame(rows)
+
+
+def print_finality(summary: pd.DataFrame) -> None:
+    fin = summary[summary["metric"].isin(FIN_METRICS)]
+    if fin.empty:
+        return
+    print("\n== Time to finality (ms; t_safe/t_finalized first seen, late by <= one poll)")
+    for _, r in fin.iterrows():
+        print(
+            f"  {r.chain:<13}{r.transport:<6}{r.config:<11}{r.metric:<13} n={int(r.n):<3}"
+            f"{r['mean']:>11.0f} ± {r.ci95:>7.0f}  median {r['median']:>9.0f}"
+            f"  [{r['min']:.0f}, {r['max']:.0f}]"
+        )
+
+
 # --- figures ---------------------------------------------------------------
 
 
@@ -458,6 +556,15 @@ def main(argv: list[str] | None = None) -> int:
     summary = summarise(df)
     tests = welch(df)
     print_summary(summary, tests)
+
+    # finality (experiments/finality.py): appended rows only, existing ones untouched
+    df = attach_finality(df, args.results)
+    fin_summary, fin_tests = summarise_finality(df), welch_finality(df)
+    if not fin_summary.empty:
+        summary = pd.concat([summary, fin_summary], ignore_index=True)
+    if not fin_tests.empty:
+        tests = pd.concat([tests, fin_tests], ignore_index=True)
+    print_finality(summary)
 
     args.out.mkdir(parents=True, exist_ok=True)
     summary.to_csv(args.out / "summary.csv", index=False, float_format="%.4f")
