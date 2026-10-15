@@ -63,7 +63,13 @@ TERMS = [
     ("inclusion_ms", "Block inclusion"),
     ("other_ms", "Other (countersign, framing)"),
 ]
-METRICS = ["latency_ms"] + [t for t, _ in TERMS] + ["confirm_ms", "clock_offset_ms", "gasUsed", "fee_wei"]
+# Device CPU time per run (run_batch.py docstring): the M7 fallback, a proxy for
+# device energy, not a measurement of it. Only sessions after a0ea140 have it.
+CPU_METRICS = ["cpu_sign_ms", "cpu_device_ms", "cpu_countersign_ms"]
+METRICS = (
+    ["latency_ms"] + [t for t, _ in TERMS]
+    + ["confirm_ms", "clock_offset_ms", "gasUsed", "fee_wei"] + CPU_METRICS
+)
 
 TRANSPORT_LABEL = {"eth": "Ethernet", "wifi": "WiFi", "ble": "Bluetooth"}
 TRANSPORT_ORDER = ["eth", "wifi", "ble"]
@@ -105,6 +111,9 @@ def load(results_dir: Path) -> pd.DataFrame:
         if col not in df:
             df[col] = legacy
         df[col] = df[col].fillna(legacy)
+    for col in CPU_METRICS:
+        if col not in df:
+            df[col] = np.nan
 
     controlled = (df["cpuGovernor"] == "performance") & (df["wifiPowersave"] == "disable")
     df["config"] = np.where(controlled, CONFIG_CONTROLLED, CONFIG_DEFAULT)
@@ -148,6 +157,8 @@ def summarise(df: pd.DataFrame) -> pd.DataFrame:
         ok = g[g["status"] == "ok"]
         counts = g["status"].value_counts().to_dict()
         for metric in METRICS:
+            if metric in CPU_METRICS and ok[metric].isna().all():
+                continue  # condition measured before CPU time was recorded
             rows.append(
                 {
                     **dict(zip(KEYS, key)),
@@ -217,7 +228,7 @@ def welch(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def print_summary(summary: pd.DataFrame, tests: pd.DataFrame) -> None:
-    show = ["latency_ms"] + [t for t, _ in TERMS] + ["clock_offset_ms", "gasUsed"]
+    show = ["latency_ms"] + [t for t, _ in TERMS] + ["clock_offset_ms", "gasUsed"] + CPU_METRICS
     order = {k: i for i, k in enumerate(condition_order(summary))}
     groups = sorted(summary.groupby(KEYS, sort=False), key=lambda kg: order[kg[0]])
     for key, g in groups:

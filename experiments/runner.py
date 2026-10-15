@@ -107,8 +107,11 @@ RECORD_COLUMNS = [
     "t2", "t3", "t4", "t5", "t6",
     "nonce", "cumulativeAmount", "serviceRef", "txHash", "blockNumber",
     "gasUsed", "effectiveGasPrice", "l1Fee", "l1GasUsed", "l1GasPrice", "gatewayReason",
+    "cpu_sign_ms", "cpu_countersign_ms", "cpu_device_ms",
 ]
-"""Must match `device/run_batch.py:build_record()` key for key; checked per row."""
+"""Must match `device/run_batch.py:build_record()` key for key; checked per row.
+The three `cpu_*` columns were added after the M5 L2/L1 sessions (a0ea140);
+earlier CSVs lack them."""
 
 
 def say(msg: str) -> None:
