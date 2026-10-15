@@ -935,3 +935,52 @@ returns pre-confirmed *receipts* is decided only by a live session (per-row `t4_
 Not a latency result: no transaction was sent; `eth_sendRawTransaction` and the receipt wait are not
 in these numbers. publicnode's sum is higher than the 328 ms in M3 cleanup (different estimate
 target, different day).
+
+## Session v2-1 — dedicated RPC (Alchemy) vs same-day publicnode control, with finality observers (2026-10-15)
+- Commit **985c64e** both machines (merged exp/finality + exp/rpc + exp/concurrency, v2 prefix, `--rpc-var`).
+  Base Sepolia, contract `0xb746…4bF9`, channel `0x69af…20D2`; WiFi; controlled (governor performance,
+  powersave disable, per row). Laptop `w32tm /resync` done; residual laptop offset −0.18 s vs
+  time.cloudflare.com (per-session clock-offset diagnostic +183 ms); Pi chrony 0.4 ms. Diagnostic only.
+- **Prefix `v2_`** (not `m5_`): these sessions never enter summary.csv/tests.csv, which stay byte-identical
+  to results-v1 (checked). They feed `rpc_summary.csv`/`rpc_tests.csv` and `finality_summary.csv`.
+- Arm 1, control: gateway on publicnode, `v2_base-sepolia_wifi_20261015T163804Z-fe45bc.csv`, nonces 189–218, **30/30 ok**.
+- Arm 2, dedicated: gateway on Alchemy (`--rpc-url-var BASE_SEPOLIA_DEDICATED_RPC_URL`, host
+  `base-sepolia.g.alchemy.com`, URL never logged — checked logs and /health), `v2_base-sepolia_wifi_20261015T164108Z-63645f.csv`,
+  nonces 219–248, **30/30 ok**. Arms run back to back, never overlapping.
+- Finality observers (`experiments/finality.py`, poll 2 s = resolution): two per arm, Alchemy and
+  publicnode, on the same transactions. 4 × 30 rows, **all `finalized`**, 0 timeouts, 0 reorgs.
+  `fin_base-sepolia_wifi_20261015T163813Z-{f8c1d1 (alchemy), c9c882 (publicnode)}.csv`,
+  `fin_base-sepolia_wifi_20261015T164117Z-{a5b443 (alchemy), 69b217 (publicnode)}.csv`.
+
+### Provider comparison (mean ± 95% CI, n = 30 each, ms; Welch)
+| | publicnode (control) | Alchemy | Alchemy − publicnode |
+|---|---|---|---|
+| receipt definition (`t4_preconf`) | pre-confirmed 30/30 | pre-confirmed 30/30 | like for like |
+| **latency `t4 − t0`** | 901.0 ± 51.0 | **782.4 ± 46.1** | **−118.6, p = 8.3e-04** |
+| build + broadcast `t3 − t2` | 674.1 ± 25.2 | **542.1 ± 27.8** | **−132.0, p = 1.5e-09** |
+| to sealed block | 2138.3 ± 204.4 | 2190.3 ± 209.4 | +52.0, p = 0.72 |
+
+Alchemy also returns Flashblocks pre-confirmed receipts, so latency compares like for like. The
+dedicated endpoint removes ~130 ms of gateway↔RPC time, matching the read-only benchmark (four
+pre-broadcast calls, −115 ms, exp/rpc entry). Time to a sealed block does not move: it is set by
+Base's 2 s block period. Thesis claim §4.2.3 ("the public RPC is the L2 bottleneck") is supported
+for pre-confirmation latency; for sealed-block latency the block period dominates.
+
+### Time to finality, Base Sepolia (ms after `t4`; n = 60 = both arms; per observer)
+| observer | `safe` | `finalized` | median finalized | range |
+|---|---|---|---|---|
+| publicnode | 121,945 ± 7,672 | **1,048,889 ± 28,373** | 1,066,670 | 838,032 – 1,209,582 |
+| Alchemy | 76,275 ± 7,650 | 1,309,808 ± 29,060 | 1,311,835 | 1,113,314 – 1,487,064 |
+
+- **Base finality ≈ 17.5 min** after the pre-confirmation (publicnode's earliest report), safe ≈ 1.3–2 min.
+- **The provider shifts the reading by ~4.4 min** (finalized) — opposite directions for `safe` (Alchemy
+  ~46 s earlier) and `finalized` (Alchemy ~261 s later). A node can only *lag* the chain's true finality,
+  never lead it, so the earlier report is the closer upper bound: **true time to finality ≤ ~17.5 min
+  (mean)**, and the single-provider gateway would believe it ~4 min late on Alchemy.
+- publicnode's `finalized` flipped between two backends on every few polls (4,439 + 3,653 regressions
+  counted); the observer records the first report reaching the tx's block, so the leading backend sets
+  its number. Alchemy: 0 regressions. Consistent with the read-only lag samples in the exp/finality
+  entry (publicnode leading backend 854–1,110 s; Alchemy ~1,334–1,406 s behind latest) — no contradiction.
+
+### Budget after
+Base Sepolia gateway **35,885,856,870,265 wei** (60 settles: 2.78e13 wei, within the 2.79e13 estimate).

@@ -1,0 +1,5 @@
+scope,config,a,b,metric,mean_a,mean_b,diff_b_minus_a,t,df,p,t4_definition
+base-sepolia/wifi,controlled,publicnode,alchemy,sealed_ms,2138.28,2190.29,52.0057,0.363464,57.9657,0.71758,preconf
+base-sepolia/wifi,controlled,publicnode,alchemy,build_ms,674.107,542.117,-131.991,-7.19163,57.4467,1.46593e-09,preconf
+base-sepolia/wifi,controlled,publicnode,alchemy,latency_ms,900.969,782.385,-118.585,-3.5296,57.4302,0.000827271,preconf
+base-sepolia/wifi,controlled,publicnode,alchemy,inclusion_ms,187.65,200.458,12.8079,0.455635,57.905,0.650357,preconf
