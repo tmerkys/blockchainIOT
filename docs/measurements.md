@@ -1017,3 +1017,46 @@ any conclusion (build was and is ~7% of L1 latency) but a day-to-day RPC effect,
 
 ### Budget after
 Ethereum Sepolia gateway **49,966,419,633,186,568 wei** (30 settles: 2.65e12 wei, as estimated).
+
+## Session v2-3 — concurrent load, K = 1, 2, 4, 8 devices, pipelining gateway (Base Sepolia, 2026-10-15)
+- Commit **c60e32f** both machines. Device side: K processes **on the Pi** (real hardware, sharing its 4 cores
+  and the WiFi link), each with its own key (generated on the Pi by `device/keygen_load.py`, passphrase
+  generated on the Pi with `--allow-env-password`, user-approved; private keys never left the Pi) and its own
+  channel. Gateway: `experiments/concurrency.py serve` with the **separate load key**
+  `0x9039bA244196b4102DBb87583Fb499afC33Db78f`, `GATEWAY_PIPELINE=1`, RPC **Alchemy** (`base-sepolia.g.alchemy.com`).
+  Every channel is 3-of-3: device_i, the load gateway, the existing merchant `0xc154…9C04`. WiFi, controlled,
+  no gap between a device's runs.
+- Funding: 0.0005 Sepolia ETH bridged from the L1 gateway to the load key via Base Sepolia's L1StandardBridge
+  `0xfd0B…3120` (verified on-chain from both sides), tx `0x73504da1…89319`, arrived after ~6 min.
+- Setup (not measured): 8 × `open()` at 149,967 gas, deposits sized for plan A ×1.5; 1.52e13 wei.
+- Data: `cc_base-sepolia_k{1,2,4,8}_20261015T19575…/20061…Z-*.csv` (prefix `cc_`, never pooled), analysis
+  `experiments/analysis/concurrency.csv`.
+
+### Results (latency/sealed: mean ± 95% CI over gap-free ok rows, ms)
+| K | ok / attempted | settled/s | settles per block (max) | latency `t4 − t0` | to sealed block |
+|---|---|---|---|---|---|
+| 1 | 30 / 30 | 0.51 | 1.00 (1) | 677.3 ± 43.1 (30) | 1966.9 ± 67.5 |
+| 2 | 30 / 30 | 1.02 | 2.00 (2) | 671.9 ± 42.7 (30) | 1988.2 ± 75.7 |
+| 4 | 40 / 40 | 2.08 | 4.00 (4) | 732.1 ± 54.0 (40) | 1983.4 ± 48.9 |
+| 8 | **51 / 80** | 3.86 | 7.29 (8) | 872.8 ± 71.7 (51) | 2024.1 ± 78.9 |
+
+- **Throughput scales linearly with K up to 4** (exactly K settlements per 2 s block, 0 failures, 0 nonce
+  resyncs); latency per payment stays ~0.7 s and time to a sealed block ~2 s. The H2 tp_ finding (one settle
+  per block) was the sequential gateway, as stated; with pipelining the 3-of-3 contract settles K per block.
+- **K = 8: 29/80 failed, all from the RPC plan, not the chain or the contract.** 28 × HTTP 429 "Too Many
+  Requests" from Alchemy's free tier (23 `rpc_error` at estimate_gas/fee lookup before a nonce was taken,
+  4 `refused` 500s, 1 `receipt_error`), plus 1 `nonce_too_low` caused by that receipt_error. Still 3.86
+  settled/s and up to 8 in one block. URL redaction held: rows carry `<rpc base-sepolia.g.alchemy.com>` only.
+- **Gateway bug found (pipelining mode only):** the `receipt_error` row (device 4, voucher nonce 17, tx nonce
+  159, tx `0x96e030ae…7188`) **did settle on-chain** (receipt status 1, checked on publicnode); only the
+  receipt *lookup* got a 429. The nonce manager treats a receipt failure like a failed broadcast, released
+  nonce 159, re-allocated it, and the next voucher failed `nonce_too_low`. No funds or payments lost, nothing
+  hidden (both rows recorded), but that row is a success recorded as a failure: **K = 8 is 52 settled, not 51.**
+  Raw CSV left as written; fix needed before any rerun (a broadcast tx's nonce is consumed whatever happens
+  to the receipt poll).
+- Latency at K = 1 (677 ms) is below the v2-1 Alchemy session (782 ms): the pipelining path skips the
+  per-tx `get_transaction_count` call (local nonce). Same provider, different gateway code path — not a
+  contradiction.
+
+### Budget after
+Load key **407,761,798,615,875 wei** (spent 9.22e13 incl. 1.1e13 deposits; plan A estimate 1.11e14).
