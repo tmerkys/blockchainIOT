@@ -22,6 +22,7 @@ dataset.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -30,6 +31,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.e2e_m1 import load_env  # noqa: E402
+from shared.rpc import rpc_host  # noqa: E402
 
 REQUIRED = ("RPC_URL", "CHAIN_ID", "PAYMENT_CHANNEL_ADDRESS", "GATEWAY_PRIVATE_KEY")
 """Without any one of these the gateway comes up degraded. `DEVICE_ADDRESS` is
@@ -49,6 +51,13 @@ def main(argv: list[str] | None = None) -> int:
         help="which env file to serve from; .env.sepolia for the L1 baseline",
     )
     parser.add_argument(
+        "--rpc-url-var",
+        default=None,
+        metavar="NAME",
+        help="take RPC_URL from this variable instead (env file or environment), e.g. "
+        "BASE_SEPOLIA_DEDICATED_RPC_URL; only its host is ever printed",
+    )
+    parser.add_argument(
         "--allow-degraded",
         action="store_true",
         help="start even if the config is incomplete (bring-up only, never a run)",
@@ -56,6 +65,19 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     env = load_env(args.env_file)
+
+    # --- exp/rpc: pick the RPC endpoint by variable name, never by value ----
+    # The dedicated URL embeds its API key, so it lives only in the gitignored
+    # env file (or the environment) and is selected by name here; it never
+    # appears on a command line, in shell history, or in output.
+    if args.rpc_url_var:
+        chosen = os.environ.get(args.rpc_url_var) or env.get(args.rpc_url_var)
+        if not chosen:
+            raise SystemExit(f"--rpc-url-var {args.rpc_url_var}: not set in {args.env_file.name} or the environment")
+        env["RPC_URL"] = chosen
+        os.environ["RPC_URL"] = chosen  # the Relayer reads os.environ at import
+    # --- end exp/rpc --------------------------------------------------------
+
     missing = [k for k in REQUIRED if not env.get(k)]
     if missing and not args.allow_degraded:
         raise SystemExit(
@@ -74,7 +96,9 @@ def main(argv: list[str] | None = None) -> int:
     import uvicorn  # imported late: argument errors should not pay for the import
 
     print(f"  gateway    http://{host}:{port}")
-    print(f"  chain      {env.get('RPC_URL')}  chainId {env.get('CHAIN_ID')}")
+    # Host only: a dedicated RPC URL carries its API key (exp/rpc).
+    rpc_source = f"  (from {args.rpc_url_var})" if args.rpc_url_var else ""
+    print(f"  chain      {rpc_host(os.environ.get('RPC_URL') or env.get('RPC_URL'))}  chainId {env.get('CHAIN_ID')}{rpc_source}")
     print(f"  contract   {env.get('PAYMENT_CHANNEL_ADDRESS')}")
     print(f"  device     {env.get('DEVICE_ADDRESS') or '(unset — any signer accepted)'}")
     print(f"  submit     {env.get('GATEWAY_SUBMIT')}\n")

@@ -39,6 +39,7 @@ from gateway.relayer import (  # noqa: E402
     RelayResult,
     VoucherRejected,
 )
+from shared.rpc import install_log_redaction, redact  # noqa: E402
 from shared.voucher import Voucher  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -104,6 +105,31 @@ def create_app(relayer: Relayer | None = None) -> FastAPI:
     # not silently on the first voucher of a measurement run.
     app.state.relayer = relayer or Relayer()
 
+    # --- exp/rpc: never let the RPC URL (API key) reach a log or a response ---
+    rpc_url = app.state.relayer.config.rpc_url
+    install_log_redaction(rpc_url)
+
+    def _scrub(text: str) -> str:
+        return redact(text, rpc_url) or ""
+
+    @app.middleware("http")
+    async def redact_unhandled(request: Request, call_next):
+        """Turn an unexpected exception into a 500 whose body and log line
+        carry no RPC URL. `requests` errors quote the URL path, which on a
+        dedicated endpoint is the API key; uvicorn's default traceback log
+        would print it verbatim."""
+        try:
+            return await call_next(request)
+        except Exception as exc:  # noqa: BLE001
+            message = _scrub(f"{type(exc).__name__}: {exc}")
+            log.error("unhandled error on %s: %s", request.url.path, message)
+            return JSONResponse(
+                status_code=500,
+                content={"accepted": False, "submitted": False, "reason": message},
+            )
+
+    # --- end exp/rpc ----------------------------------------------------------
+
     @app.middleware("http")
     async def stamp_t2(request: Request, call_next):
         """Mark t2 before FastAPI parses or validates the body.
@@ -118,19 +144,21 @@ def create_app(relayer: Relayer | None = None) -> FastAPI:
     @app.exception_handler(VoucherRejected)
     async def _rejected(request: Request, exc: VoucherRejected) -> JSONResponse:
         """A voucher the contract would revert on. The device's problem, so 422."""
-        log.info("rejected voucher: %s", exc.reason)
+        reason = _scrub(exc.reason)  # exp/rpc
+        log.info("rejected voucher: %s", reason)
         return JSONResponse(
             status_code=HTTP_UNPROCESSABLE,
-            content={"accepted": False, "submitted": False, "reason": exc.reason},
+            content={"accepted": False, "submitted": False, "reason": reason},
         )
 
     @app.exception_handler(RelayerNotReady)
     async def _not_ready(request: Request, exc: RelayerNotReady) -> JSONResponse:
         """The gateway is misconfigured. Our problem, not the device's, so 503."""
-        log.error("relayer not ready: %s", exc)
+        reason = _scrub(str(exc))  # exp/rpc
+        log.error("relayer not ready: %s", reason)
         return JSONResponse(
             status_code=HTTP_UNAVAILABLE,
-            content={"accepted": False, "submitted": False, "reason": str(exc)},
+            content={"accepted": False, "submitted": False, "reason": reason},
         )
 
     @app.post("/voucher", response_model=RelayResult)
