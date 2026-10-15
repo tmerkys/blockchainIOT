@@ -196,6 +196,14 @@ class DeviceAgent:
         self.transport: Transport = transport if transport is not None else LoggingTransport()
         self.nonce = 0
         self.cumulative_amount = 0
+        self.settled_baseline = 0
+        """Wei already released on this channel before this agent started.
+
+        `cumulativeAmount` is cumulative over the *channel*, not the session,
+        so an agent that restarts against a channel which has already settled
+        must price from where the chain left off. Left at 0 the next voucher
+        repeats an amount the contract has already paid and reverts as "not
+        monotonic" — see `resume_from()`."""
 
     @property
     def address(self) -> str:
@@ -210,9 +218,33 @@ class DeviceAgent:
         """
         return cumulative_mwh * self.config.price_wei_per_kwh // MWH_PER_KWH
 
+    def resume_from(self, *, paid: int, nonce: int) -> None:
+        """Adopt a channel's settled state as this agent's starting point.
+
+        Takes the contract's `paid` and `nonce`, normally relayed by the
+        gateway's `GET /channel/{id}` — the device has no RPC of its own. The
+        contract remains the authority; this only stops the device from
+        proposing a voucher it already knows would revert.
+
+        Without it, every restart begins at zero and the first voucher of the
+        second session is worth less than what the channel has already paid.
+        On a channel settled once that looks like a puzzling rejection; across
+        M5's N>=30 repeats it is every run after the first.
+        """
+        if paid < 0 or nonce < 0:
+            raise ValueError("paid and nonce cannot be negative")
+        self.settled_baseline = paid
+        self.cumulative_amount = paid
+        self.nonce = nonce
+
     def build_voucher(self, event: SensorEvent, *, now: int | None = None) -> Voucher:
-        """Build the next voucher for this channel from a service event."""
-        amount = self.price(event.cumulative_mwh)
+        """Build the next voucher for this channel from a service event.
+
+        The amount is what the channel had already paid plus the value of the
+        energy this session has metered, keeping `cumulativeAmount` monotonic
+        across restarts as well as within a session.
+        """
+        amount = self.settled_baseline + self.price(event.cumulative_mwh)
         if amount <= self.cumulative_amount:
             # The contract rejects this as "not monotonic"; catching it here
             # stops a tick too small to bill from burning a nonce.

@@ -7,3 +7,13 @@ __pycache__/
 contracts/out/
 contracts/cache/
 contracts/foundry.lock
+
+# Keep every local env file out of git, but ship the template.
+.env.*
+!.env.example
+
+# run_batch.py backup copy on the Pi; the laptop CSV is the dataset.
+experiments/device_log/
+
+# Thesis handoff bundle (copied from tracked files; regenerate, do not edit)
+handoff/

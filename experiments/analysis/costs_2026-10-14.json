@@ -1,0 +1,128 @@
+{
+  "reference_date": "2026-10-14",
+  "prices_taken_utc": "2026-10-14T17:16:40+00:00",
+  "eth_eur": 2228.8582632351054,
+  "gas_price": {
+    "eth-mainnet": {
+      "blocks": 7201,
+      "median": 116328938,
+      "p10": 67000000,
+      "p90": 821555040,
+      "head": 26192178
+    },
+    "base-mainnet": {
+      "blocks": 24576,
+      "median": 6000000.0,
+      "p10": 6000000,
+      "p90": 6500000,
+      "head": 52604441
+    }
+  },
+  "base_l1_fee": {
+    "deploy": {
+      "samples": 25,
+      "median": 31814497608,
+      "p10": 26795877774,
+      "p90": 173824392688,
+      "tx_bytes": 10316
+    },
+    "open_first": {
+      "samples": 25,
+      "median": 1325625779,
+      "p10": 1116513194,
+      "p90": 7242801658,
+      "tx_bytes": 220
+    },
+    "settle_first": {
+      "samples": 25,
+      "median": 2812595339,
+      "p10": 2368918782,
+      "p90": 15367134908,
+      "tx_bytes": 760
+    },
+    "settle": {
+      "samples": 25,
+      "median": 2770624424,
+      "p10": 2333568625,
+      "p90": 15137819050,
+      "tx_bytes": 760
+    },
+    "close_after_settles": {
+      "samples": 25,
+      "median": 2812595339,
+      "p10": 2368918782,
+      "p90": 15367134908,
+      "tx_bytes": 760
+    },
+    "open": {
+      "samples": 25,
+      "median": 1325625779,
+      "p10": 1116513194,
+      "p90": 7242801658,
+      "tx_bytes": 220
+    },
+    "close_only": {
+      "samples": 25,
+      "median": 2812595339,
+      "p10": 2368918782,
+      "p90": 15367134908,
+      "tx_bytes": 760
+    },
+    "settle_first_newmerchant": {
+      "samples": 25,
+      "median": 2812595339,
+      "p10": 2368918782,
+      "p90": 15367134908,
+      "tx_bytes": 760
+    }
+  },
+  "gas_units": {
+    "eth-mainnet": {
+      "deploy": 2037870,
+      "open_first": 167067,
+      "settle_first": 111441,
+      "settle": 77229,
+      "close_after_settles": 109366,
+      "open": 149967,
+      "close_only": 143566,
+      "settle_first_newmerchant": 136417
+    },
+    "base-mainnet": {
+      "deploy": 2037870,
+      "open_first": 167067,
+      "settle_first": 111417,
+      "settle": 77217,
+      "close_after_settles": 109354,
+      "open": 149967,
+      "close_only": 143578,
+      "settle_first_newmerchant": 136441
+    },
+    "eth-sepolia": {
+      "deploy": 14375662,
+      "open_first": 694875,
+      "settle_first": 284169,
+      "settle": 88329,
+      "close_after_settles": 210774,
+      "open": 596949,
+      "close_only": 406626,
+      "settle_first_newmerchant": 467757
+    },
+    "base-sepolia": {
+      "deploy": 2037870,
+      "open_first": 167067,
+      "settle_first": 111441,
+      "settle": 77229,
+      "close_after_settles": 109354,
+      "open": 149967,
+      "close_only": 143578,
+      "settle_first_newmerchant": 136429
+    }
+  },
+  "rpc": {
+    "eth-mainnet": "https://ethereum-rpc.publicnode.com",
+    "base-mainnet": "https://mainnet.base.org",
+    "eth-sepolia": "https://ethereum-sepolia-rpc.publicnode.com",
+    "base-sepolia": "https://base-sepolia-rpc.publicnode.com"
+  },
+  "simulation_controls_ok": true
+}

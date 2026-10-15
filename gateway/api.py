@@ -68,6 +68,16 @@ class VoucherRequest(BaseModel):
     t0: float | None = Field(default=None, description="Pi: sensor event fires")
     t1: float | None = Field(default=None, description="Pi: voucher signed")
 
+    close: bool = Field(
+        default=False,
+        description=(
+            "Submit close() instead of settle(): pay the merchant this voucher's "
+            "delta, refund the unspent deposit to the funder, and finish the "
+            "channel. This is the single on-chain transaction M4 amortises 200 "
+            "off-chain ticks over."
+        ),
+    )
+
     @field_validator("sigDevice", "sigMerchant")
     @classmethod
     def _validate_signature(cls, v: str | None) -> str | None:
@@ -132,14 +142,34 @@ def create_app(relayer: Relayer | None = None) -> FastAPI:
         built, nothing was broadcast. 422 means the voucher itself is bad.
         """
         relayer: Relayer = request.app.state.relayer
-        return relayer.relay(
+        result = relayer.relay(
             req.voucher,
             HexBytes(req.sigDevice),
             HexBytes(req.sigMerchant) if req.sigMerchant else None,
+            close=req.close,
             t0=req.t0,
             t1=req.t1,
             t2=getattr(request.state, "t2", None),
         )
+        # Pairs with t2 to let the device estimate the clock offset between the
+        # two machines (M2). Taken here, the last gateway-side instant that can
+        # still ride inside the body - serialisation and the write to the
+        # socket fall outside it, which biases the estimate by microseconds and
+        # is why it stays a diagnostic rather than a correction.
+        result.t6 = time.time()
+        return result
+
+    @app.get("/channel/{channel}")
+    async def channel(channel: str, request: Request) -> dict[str, Any]:
+        """On-chain state of one channel, so the device can resume from it.
+
+        The device has no RPC of its own and must not grow one: it signs and
+        transmits, and the gateway is its only window onto the chain. What it
+        needs from that window is exactly `paid` and `nonce` — the two values
+        that decide whether its next voucher is monotonic.
+        """
+        relayer: Relayer = request.app.state.relayer
+        return relayer.channel_state(channel)
 
     @app.get("/health")
     async def health(request: Request) -> dict[str, Any]:

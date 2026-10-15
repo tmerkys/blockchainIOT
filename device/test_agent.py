@@ -320,3 +320,41 @@ def test_load_account_without_a_key_fails_loudly():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
+
+
+def test_resume_from_keeps_vouchers_monotonic_across_restarts():
+    """A restarted agent must not re-propose an amount the channel has paid.
+
+    The failure this guards is the one that showed up on Base Sepolia: a fresh
+    agent starts its meter session at zero, prices from zero, and sends a
+    voucher worth less than `paid`. The contract rejects it as "not monotonic"
+    — correctly — and every run after the first fails.
+    """
+    agent = _agent()
+    settled = agent.price(_event(cumulative_mwh=28_000).cumulative_mwh)
+
+    # A new agent for the same channel, as if the process had restarted.
+    resumed = _agent()
+    resumed.resume_from(paid=settled, nonce=1)
+
+    # Its meter also restarts at zero, but the voucher prices from the baseline.
+    voucher = resumed.build_voucher(_event(cumulative_mwh=5_000, sequence=1))
+    assert voucher.cumulativeAmount > settled
+    assert voucher.cumulativeAmount == settled + resumed.price(5_000)
+    assert voucher.nonce == 2
+
+
+def test_resume_from_rejects_negative_state():
+    agent = _agent()
+    with pytest.raises(ValueError):
+        agent.resume_from(paid=-1, nonce=0)
+    with pytest.raises(ValueError):
+        agent.resume_from(paid=0, nonce=-1)
+
+
+def test_unresumed_agent_still_starts_at_zero():
+    """The fresh-channel path is unchanged: no baseline, no offset."""
+    agent = _agent()
+    voucher = agent.build_voucher(_event(cumulative_mwh=28_000))
+    assert voucher.cumulativeAmount == agent.price(28_000)
+    assert voucher.nonce == 1

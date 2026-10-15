@@ -39,7 +39,12 @@ log = logging.getLogger(__name__)
 
 ZERO_ADDRESS = "0x" + "00" * 20
 SIGNATURE_LENGTH = 65  # r + s + v
-RPC_TIMEOUT_S = 2.0
+RPC_TIMEOUT_S = 10.0
+"""Per-request HTTP timeout to the RPC endpoint. 2 s was fine against a local
+anvil on loopback and is not fine against a public endpoint like Base Sepolia,
+where a single `eth_estimateGas` crossing the internet under load can exceed it
+— and a timeout mid-run surfaces as a failed settlement, not a slow one.
+Override with `RPC_TIMEOUT_S` for a particularly slow provider."""
 
 RECEIPT_TIMEOUT_S = 120.0
 """Ceiling on the wait for inclusion. Long enough for a slow public testnet
@@ -77,8 +82,47 @@ SETTLE_ABI: list[dict[str, Any]] = [
             {"name": "sigGateway", "type": "bytes"},
             {"name": "sigMerchant", "type": "bytes"},
         ],
-    }
+    },
+    {
+        "type": "function",
+        "name": "channels",
+        "stateMutability": "view",
+        "inputs": [{"name": "", "type": "address"}],
+        "outputs": [
+            {"name": "device", "type": "address"},
+            {"name": "gateway", "type": "address"},
+            {"name": "merchant", "type": "address"},
+            {"name": "funder", "type": "address"},
+            {"name": "deposit", "type": "uint256"},
+            {"name": "paid", "type": "uint256"},
+            {"name": "nonce", "type": "uint256"},
+            {"name": "closed", "type": "bool"},
+        ],
+    },
 ]
+
+# `close()` takes the same arguments as `settle()`; only the selector differs.
+SETTLE_ABI.append({**SETTLE_ABI[0], "name": "close"})
+
+
+def receipt_int(value: Any) -> int | None:
+    """Coerce a receipt field to int, whatever shape the node sent it in.
+
+    web3 normalises the receipt fields it knows about, but OP-stack extras like
+    `l1Fee` are not in its schema and arrive as raw hex strings ("0x0"). A bare
+    `int()` on those raises, and it would raise *after* the transaction was
+    already mined — turning a successful settlement into a crashed run and a
+    missing row. Returns None for a genuinely absent field, which must stay
+    distinct from a zero fee.
+    """
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        return int.from_bytes(value, "big")
+    text = str(value).strip()
+    return int(text, 16) if text.lower().startswith("0x") else int(text)
 
 
 class VoucherRejected(Exception):
@@ -115,6 +159,7 @@ class RelayerConfig:
     device_address: str | None = None
     merchant_address: str | None = None
     confirmations: int = 1
+    rpc_timeout: float = RPC_TIMEOUT_S
 
     submit: bool = False
     """Broadcast `settle()`, or stop once the calldata is built?
@@ -147,6 +192,15 @@ class RelayerConfig:
                 return False
             raise ValueError(f"{name} must be a boolean, got {raw!r}")
 
+        def number(name: str, default: float) -> float:
+            raw = env.get(name, "").strip()
+            if not raw:
+                return default
+            try:
+                return float(raw)
+            except ValueError as exc:
+                raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+
         def integer(name: str, default: int) -> int:
             raw = env.get(name, "").strip()
             if not raw:
@@ -172,6 +226,7 @@ class RelayerConfig:
             device_address=address("DEVICE_ADDRESS", defaults.device_address),
             merchant_address=address("MERCHANT_ADDRESS", defaults.merchant_address),
             confirmations=integer("CONFIRMATIONS", defaults.confirmations),
+            rpc_timeout=number("RPC_TIMEOUT_S", defaults.rpc_timeout),
             submit=boolean("GATEWAY_SUBMIT", defaults.submit),
         )
 
@@ -187,6 +242,8 @@ class RelayResult(BaseModel):
     accepted: bool
     submitted: bool
     reason: str | None = None
+    closed: bool = False
+    """True when this transaction was `close()` rather than `settle()`."""
 
     channel: str
     nonce: int
@@ -208,6 +265,8 @@ class RelayResult(BaseModel):
     gasUsed: int | None = None
     effectiveGasPrice: int | None = None
     l1Fee: int | None = None
+    l1GasUsed: int | None = None
+    l1GasPrice: int | None = None
 
     # Instrumentation marks. t0/t1 are the device's clock, t2-t5 the gateway's;
     # read the clock-skew warning in CLAUDE.md before subtracting across that line.
@@ -217,6 +276,13 @@ class RelayResult(BaseModel):
     t3: float | None = None  # gateway: tx broadcast, hash returned
     t4: float | None = None  # gateway: receipt received (included in block)
     t5: float | None = None  # gateway: N-confirmation depth reached
+
+    # Not one of CLAUDE.md's marks. Stamped by the API handler just before the
+    # response goes back, purely so the device can pair (t2, t6) with its own
+    # (send, receive) instants and estimate the clock offset between the two
+    # machines - the skew sanity check CLAUDE.md asks for from M2 onward.
+    # Nothing is ever computed by subtracting it from a device-side mark.
+    t6: float | None = None  # gateway: response handed back to the transport
 
 
 class Relayer:
@@ -231,7 +297,9 @@ class Relayer:
     def __init__(self, config: RelayerConfig | None = None, w3: Web3 | None = None) -> None:
         self.config = config or RelayerConfig.from_env()
         self.w3 = w3 or Web3(
-            Web3.HTTPProvider(self.config.rpc_url, request_kwargs={"timeout": RPC_TIMEOUT_S})
+            Web3.HTTPProvider(
+                self.config.rpc_url, request_kwargs={"timeout": self.config.rpc_timeout}
+            )
         )
         self._contract = self.w3.eth.contract(
             address=to_checksum_address(self.config.payment_channel), abi=SETTLE_ABI
@@ -325,15 +393,22 @@ class Relayer:
         sig_device: bytes,
         sig_gateway: bytes,
         sig_merchant: bytes,
+        *,
+        close: bool = False,
     ) -> dict[str, Any]:
-        """Encode `settle(...)` into an unsigned transaction dict.
+        """Encode `settle(...)` — or `close(...)` — into an unsigned transaction.
+
+        `close` takes the identical arguments and the identical 3-of-3 checks;
+        it additionally returns the unspent deposit to the funder and marks the
+        channel finished. It is what M4 submits after 200 ticks have
+        accumulated off-chain.
 
         `nonce`, `gas` and the fee fields are left out on purpose - they are
         filled in at submit time, when an RPC is actually reachable, so the
         calldata can be built and tested with no chain at all.
         """
         calldata = self._contract.encode_abi(
-            "settle",
+            "close" if close else "settle",
             args=[
                 (
                     voucher.channel,
@@ -442,13 +517,15 @@ class Relayer:
         receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=RECEIPT_TIMEOUT_S)
         result.t4 = time.time()
 
-        result.blockNumber = receipt["blockNumber"]
-        result.gasUsed = receipt["gasUsed"]
-        effective = receipt.get("effectiveGasPrice")
-        result.effectiveGasPrice = int(effective) if effective is not None else None
-        # OP-stack only (Base): the L1 data-availability fee. Absent elsewhere.
-        l1_fee = receipt.get("l1Fee")
-        result.l1Fee = int(l1_fee) if l1_fee is not None else None
+        result.blockNumber = receipt_int(receipt["blockNumber"])
+        result.gasUsed = receipt_int(receipt["gasUsed"])
+        result.effectiveGasPrice = receipt_int(receipt.get("effectiveGasPrice"))
+        # OP-stack only (Base): the L1 data-availability fee, and the L1 gas and
+        # price it is computed from. On Base this is most of the real cost — the
+        # understatement CLAUDE.md warns about — and it arrives as a hex string.
+        result.l1Fee = receipt_int(receipt.get("l1Fee"))
+        result.l1GasUsed = receipt_int(receipt.get("l1GasUsed"))
+        result.l1GasPrice = receipt_int(receipt.get("l1GasPrice"))
 
         if receipt["status"] != 1:
             # estimate_gas passed and it still reverted - state moved underneath
@@ -475,6 +552,7 @@ class Relayer:
         sig_device: bytes,
         sig_merchant: bytes | None = None,
         *,
+        close: bool = False,
         t0: float | None = None,
         t1: float | None = None,
         t2: float | None = None,
@@ -495,7 +573,9 @@ class Relayer:
             raise VoucherRejected("missing merchant signature: settle() is 3-of-3")
 
         sig_gateway = self.sign(voucher)
-        tx = self.build_settle_tx(voucher, sig_device, sig_gateway, sig_merchant or b"")
+        tx = self.build_settle_tx(
+            voucher, sig_device, sig_gateway, sig_merchant or b"", close=close
+        )
 
         result = RelayResult(
             accepted=True,
@@ -507,12 +587,62 @@ class Relayer:
             device=device,
             gateway=self.gateway_address,
             merchant=merchant,
+            closed=close,
             calldata=tx["data"],
             t0=t0,
             t1=t1,
             t2=t2,
         )
         return self._submit(tx, result)
+
+    # --- channel state ------------------------------------------------------
+
+    def channel_state(self, channel: str) -> dict[str, Any]:
+        """Read one channel's on-chain state, for the device to resume from.
+
+        The device holds no RPC connection — that is the architecture, not an
+        oversight — so it cannot see how much of its channel has already been
+        settled. Without this it restarts every session believing nothing has
+        been paid, and the second voucher it ever sends is non-monotonic and
+        rejected. That is invisible on a channel settled once and fatal to
+        M5's N>=30 runs, which settle the same channel repeatedly.
+
+        The contract stays the single source of truth for `paid` and `nonce`;
+        this only relays what it says.
+        """
+        address = to_checksum_address(channel)
+        try:
+            (
+                device,
+                gateway,
+                merchant,
+                funder,
+                deposit,
+                paid,
+                nonce,
+                closed,
+            ) = self._contract.functions.channels(address).call()
+        except Exception as exc:
+            raise RelayerNotReady(f"could not read channel {address}: {exc}") from exc
+
+        return {
+            "channel": address,
+            # The zero device address is how the contract spells "no such
+            # channel"; `settle()` rejects it with "unknown channel".
+            "exists": device != ZERO_ADDRESS,
+            "device": device,
+            "gateway": gateway,
+            "merchant": merchant,
+            "funder": funder,
+            "deposit": deposit,
+            "paid": paid,
+            "nonce": nonce,
+            "closed": closed,
+            # What the device may still accumulate against. A voucher above this
+            # reverts as "exceeds deposit", and the device cannot work that out
+            # for itself without an RPC.
+            "remaining": deposit - paid,
+        }
 
     # --- health -------------------------------------------------------------
 

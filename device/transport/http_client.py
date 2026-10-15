@@ -12,17 +12,27 @@ and nanosecond marks) and the gateway's `VoucherRequest` schema (which wants
 has to know what the gateway's JSON looks like, and the BLE transport can map
 the same payload differently.
 
-Latency note: `t2` is stamped by the gateway when the request lands, so
-`t2 - t1` is transport time as the gateway sees it. This module also records a
-local round-trip (`rtt_ns`) — the gateway-side sanity check CLAUDE.md asks for
-against clock skew. If `t2 - t1` ever exceeds the round-trip, the two clocks
-are out of step and the latency numbers from that run are not usable.
+Latency note, and the reason this module stamps anything at all. From M2 the
+device and the gateway are different machines with different clocks, so `t4 -
+t0` across that line is a subtraction of two unrelated clocks and whatever NTP
+skew sits between them. `DeviceMarks` closes that hole: this module stamps the
+moment the gateway's reply lands (`t4_dev`) on the *device's* monotonic clock,
+the same clock `sensor.py` stamps `t0` on. The reported H1 latency is therefore
+`t4_dev - t0`, one clock, no skew term at all.
+
+The gateway's own `t2`-`t5` still come back in the response and are still worth
+having — differences *among* them share the gateway's clock and are equally
+exact, which is what lets ch. 4 decompose inclusion time out of the total. The
+only quantities that cross the clock boundary are `clock_offset_ns()` (an
+estimate, reported as the skew sanity check CLAUDE.md asks for and never
+subtracted from anything) and nothing else.
 """
 
 from __future__ import annotations
 
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -49,6 +59,107 @@ arrives, so this has to outlast block inclusion, not just the network."""
 
 Countersigner = Callable[["Voucher"], str]
 """Produces the merchant's signature over a voucher, as a 0x-hex string."""
+
+
+@dataclass(frozen=True)
+class DeviceMarks:
+    """Send and receive instants for one voucher POST, on the device's clocks.
+
+    Both clocks are kept for each instant on purpose. The monotonic pair is
+    what latency is computed from — it cannot be stepped by NTP mid-run, so a
+    `chrony` correction landing between `t0` and `t4_dev` cannot manufacture or
+    erase milliseconds. The wall-clock pair exists only to estimate the offset
+    against the gateway, which needs two clocks that mean the same thing by
+    definition, and monotonic clocks do not (they count from an arbitrary
+    epoch, typically boot).
+    """
+
+    t_send_ns: int
+    """Wall clock, just before the request goes out."""
+
+    t_send_mono_ns: int
+    """Monotonic, same instant as `t_send_ns`."""
+
+    t4_dev_ns: int
+    """Wall clock, the moment the gateway's reply is fully received. This is
+    mark `t4` as the *device* observes it: the gateway only answers once it
+    holds the receipt, so the reply landing means the tx is in a block."""
+
+    t4_dev_mono_ns: int
+    """Monotonic, same instant as `t4_dev_ns`. The end of the reported span."""
+
+    @property
+    def rtt_ns(self) -> int:
+        """Device-observed round trip: request out to reply in, one clock."""
+        return self.t4_dev_mono_ns - self.t_send_mono_ns
+
+    def network_ns(self, t2: float | None, t6: float | None) -> int | None:
+        """Time on the wire in both directions, with no clock-skew term.
+
+        `rtt_ns` is measured entirely on the device's clock; `t6 - t2` is
+        measured entirely on the gateway's. Subtracting one span from the
+        other leaves what the gateway was not doing — the two network legs
+        plus HTTP framing — and the two clocks' offsets never enter, because
+        neither span ever crossed between them. This is the one honest way to
+        get the transport term of the decomposition out of a two-machine run.
+
+        The end mark is `t6` (the gateway handing the response back), not
+        `t4` (the receipt). The gateway holds the request open past `t4` while
+        it waits for confirmation depth, so measuring to `t4` books that wait
+        as network time. Against anvil that was ~1 ms and invisible; against
+        Base Sepolia it was 2 s, and turned a 7 ms LAN into a reported 2010 ms
+        of "network".
+        """
+        if t2 is None or t6 is None:
+            return None
+        return self.rtt_ns - round((t6 - t2) * 1e9)
+
+    def post_receipt_ns(self, t4: float | None, t6: float | None) -> int | None:
+        """How long the gateway held the response *after* the receipt landed.
+
+        Confirmation waiting plus serialisation. Both marks are the gateway's,
+        so this is a clean single-clock duration.
+        """
+        if t4 is None or t6 is None:
+            return None
+        return round((t6 - t4) * 1e9)
+
+    def reported_latency_ns(
+        self, t0_mono_ns: int, t4: float | None, t6: float | None
+    ) -> int | None:
+        """CLAUDE.md's `t4 - t0`: sensor event to block inclusion.
+
+        `t4_dev - t0` is the device-clock span from the sensor event to the
+        reply landing, but the reply is sent at `t6`, not `t4` — so it carries
+        the gateway's confirmation wait, which CLAUDE.md scores as `t5 - t4`
+        and explicitly keeps out of the reported number.
+
+        Subtracting `t6 - t4` fixes that without reintroducing skew: it is a
+        *duration* on the gateway's clock being removed from a *duration* on
+        the device's. Durations carry no epoch, so no offset enters — only
+        relative drift between two oscillators over a few seconds, which is
+        nanoseconds. Instants would be a different matter, and that is the
+        subtraction this class exists to avoid.
+        """
+        post = self.post_receipt_ns(t4, t6)
+        if post is None:
+            return None
+        return (self.t4_dev_mono_ns - t0_mono_ns) - post
+
+    def clock_offset_ns(self, t2: float | None, t6: float | None) -> int | None:
+        """Estimated gateway-clock-minus-device-clock offset, NTP-style.
+
+        The usual four-timestamp estimator: with the outbound and return legs
+        assumed symmetric, the mean of (arrival - departure) in each direction
+        is the offset and the asymmetry cancels. It is a diagnostic only —
+        CLAUDE.md asks for the measured offset in `docs/measurements.md`, and
+        a large one now invalidates nothing, because no reported number is a
+        difference across the two clocks any more. It does still mean the two
+        boxes disagree about when things happened, which is worth knowing.
+        """
+        if t2 is None or t6 is None:
+            return None
+        return ((round(t2 * 1e9) - self.t_send_ns) + (round(t6 * 1e9) - self.t4_dev_ns)) // 2
 
 
 class GatewayError(RuntimeError):
@@ -92,9 +203,14 @@ class HttpTransport:
         self.session = session or requests.Session()
 
         self.last_response: dict[str, Any] | None = None
-        self.last_rtt_ns: int | None = None
+        self.last_marks: DeviceMarks | None = None
 
-    def build_request(self, signed: SignedVoucher) -> dict[str, Any]:
+    @property
+    def last_rtt_ns(self) -> int | None:
+        """Round trip of the most recent POST, or None if none has completed."""
+        return self.last_marks.rtt_ns if self.last_marks else None
+
+    def build_request(self, signed: SignedVoucher, *, close: bool = False) -> dict[str, Any]:
         """Map the device's wire payload onto the gateway's request schema."""
         wire = signed.to_wire()
         body: dict[str, Any] = {
@@ -106,26 +222,45 @@ class HttpTransport:
             "t0": wire["marks"]["t0_ns"] / 1e9,
             "t1": wire["marks"]["t1_ns"] / 1e9,
         }
+        if close:
+            # Ask for close() rather than settle(): the last voucher of a
+            # channel both pays the merchant and returns the remainder.
+            body["close"] = True
         if self.countersign is not None:
             body["sigMerchant"] = self.countersign(signed.voucher)
         return body
 
-    def send(self, signed: SignedVoucher) -> dict[str, Any]:
+    def send(self, signed: SignedVoucher, *, close: bool = False) -> dict[str, Any]:
         """POST one voucher and return the gateway's `RelayResult` as a dict.
 
         Raises `GatewayError` on a refusal or a dead gateway. A voucher that was
         accepted but not submitted is *not* an error - that is calldata-only
         mode, and the caller reads `submitted` to tell the two apart.
         """
-        body = self.build_request(signed)
+        body = self.build_request(signed, close=close)
         endpoint = f"{self.url}/voucher"
 
-        sent_ns = time.monotonic_ns()
+        # Both clocks, at both ends of the exchange. `t4_dev` is mark t4 taken
+        # here rather than on the gateway: the gateway does not answer until it
+        # has the receipt, so the reply landing is the device-side observation
+        # of "included in a block" — and it is on the same clock as t0, which
+        # is the entire point (see the latency note at the top of this module).
+        t_send_ns, t_send_mono_ns = time.time_ns(), time.monotonic_ns()
         try:
             response = self.session.post(endpoint, json=body, timeout=self.timeout)
         except requests.RequestException as exc:
             raise GatewayError(f"gateway unreachable at {endpoint}: {exc}") from exc
-        self.last_rtt_ns = time.monotonic_ns() - sent_ns
+        t4_dev_ns, t4_dev_mono_ns = time.time_ns(), time.monotonic_ns()
+
+        # Recorded even for a rejection below: a failed attempt still gets a
+        # row in the dataset (M5), and "how long did the refusal take" is a
+        # real number, not a gap.
+        self.last_marks = DeviceMarks(
+            t_send_ns=t_send_ns,
+            t_send_mono_ns=t_send_mono_ns,
+            t4_dev_ns=t4_dev_ns,
+            t4_dev_mono_ns=t4_dev_mono_ns,
+        )
 
         try:
             payload = response.json()
@@ -142,6 +277,20 @@ class HttpTransport:
 
         self.last_response = payload
         return payload
+
+    def channel_state(self, channel: str) -> dict[str, Any]:
+        """Ask the gateway what the chain says about `channel`.
+
+        The device's only window onto chain state, and deliberately a narrow
+        one: it reads `paid` and `nonce` so its next voucher is monotonic, and
+        holds no RPC connection of its own.
+        """
+        try:
+            response = self.session.get(f"{self.url}/channel/{channel}", timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as exc:
+            raise GatewayError(f"could not read channel {channel}: {exc}") from exc
 
     def health(self) -> dict[str, Any]:
         """`GET /health`. Call it before a run, not during one."""

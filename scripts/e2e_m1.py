@@ -91,9 +91,11 @@ FALLBACK_ABI: list[dict[str, Any]] = [
             {"name": "device", "type": "address"},
             {"name": "gateway", "type": "address"},
             {"name": "merchant", "type": "address"},
+            {"name": "funder", "type": "address"},
             {"name": "deposit", "type": "uint256"},
             {"name": "paid", "type": "uint256"},
             {"name": "nonce", "type": "uint256"},
+            {"name": "closed", "type": "bool"},
         ],
     },
     {
@@ -479,8 +481,9 @@ def main(argv: list[str] | None = None) -> int:
         on_chain = contract.functions.channels(channel).call()
         merchant_balance = w3.from_wei(w3.eth.get_balance(merchant.address), "ether")
         print(
-            f"\n  channel state: paid {on_chain[4]:,} wei, nonce {on_chain[5]}, "
-            f"deposit {w3.from_wei(on_chain[3], 'ether')} ETH"
+            # Channel gained `funder` at index 3 in M4, shifting deposit/paid/nonce.
+            f"\n  channel state: paid {on_chain[5]:,} wei, nonce {on_chain[6]}, "
+            f"deposit {w3.from_wei(on_chain[4], 'ether')} ETH"
         )
         print(f"  merchant balance now {merchant_balance} ETH")
         return 0
