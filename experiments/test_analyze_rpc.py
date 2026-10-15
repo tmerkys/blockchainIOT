@@ -101,15 +101,29 @@ def test_legacy_rows_are_publicnode_and_unflagged():
     assert df["t4_preconf"].isna().all()
 
 
+def _lf(text: str) -> str:
+    return text.replace("\r\n", "\n")
+
+
 @pytest.mark.skipif(not RESULTS.exists(), reason="no committed results")
-def test_real_data_produces_no_rpc_output_and_main_tables_unchanged(tmp_path):
+def test_real_m5_data_is_publicnode_and_main_tables_match_results_v1(tmp_path):
+    """The published (m5_) data is all publicnode, and the main tables are the
+    results-v1 tables byte for byte (line endings aside). Later sessions (v2_,
+    incl. the dedicated-RPC runs) may add rpc_* / finality_* files, never rows here."""
+    import subprocess
+
     df = analyze.load(RESULTS)
     assert (df["provider"] == "publicnode").all()
     assert len(analyze.baseline_rows(df)) == len(df)
     assert analyze.rpc_groups(df) == []
     analyze.main(["--no-figures", "--out", str(tmp_path)])
-    assert not (tmp_path / "rpc_summary.csv").exists()
-    assert not (tmp_path / "rpc_tests.csv").exists()
+    for name in ("summary.csv", "tests.csv"):
+        tagged = subprocess.run(
+            ["git", "show", f"results-v1:experiments/analysis/{name}"],
+            capture_output=True, text=True, check=True, cwd=RESULTS.parent.parent,
+        ).stdout
+        now = (tmp_path / name).read_text(encoding="utf-8")
+        assert _lf(now) == _lf(tagged), name
 
 
 def test_dedicated_rows_stay_out_of_main_tables(tmp_path):

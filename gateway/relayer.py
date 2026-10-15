@@ -838,7 +838,17 @@ class Relayer:
         except Exception as exc:  # noqa: BLE001
             failure = FAIL_NOT_MINED if isinstance(exc, TimeExhausted) else FAIL_RECEIPT
             nonces.landed()
-            nonces.fail(nonce, failure)
+            if failure == FAIL_NOT_MINED:
+                # No receipt within the timeout: the tx may have been dropped,
+                # leaving its nonce unused and everything above it stalled.
+                nonces.fail(nonce, failure)
+            # FAIL_RECEIPT: the node accepted the broadcast (it returned the
+            # hash) and only the receipt *lookup* failed — e.g. a 429 from the
+            # RPC. The nonce is consumed whether or not the tx has mined yet;
+            # resyncing here would hand it out again (v2-3, 2026-10-15: tx
+            # nonce 159 settled on-chain, its nonce was re-allocated and the
+            # next voucher failed nonce_too_low). The row's outcome is unknown
+            # at reply time, not failed; check txHash against the chain.
             result.gapBehind = nonces.release(nonce)
             result.nonceResyncs = nonces.resyncs
             return self._fail(result, failure, f"tx {result.txHash} nonce {nonce}: {exc}")

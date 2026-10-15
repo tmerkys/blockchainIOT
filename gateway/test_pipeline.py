@@ -332,3 +332,29 @@ def test_pipelined_failure_detail_never_carries_the_rpc_key():
                   R.FAIL_RPC, f"estimate_gas: HTTPError for url: {secret_url}")
     assert "SECRETKEY123" not in res.reason
     assert "base-sepolia.example.com" in res.reason
+
+
+def test_receipt_lookup_error_keeps_the_nonce_consumed():
+    """A broadcast tx whose receipt poll fails (e.g. RPC 429) has used its nonce.
+
+    Regression for v2-3: the gateway resynced after a receipt-lookup error, the
+    resync's own RPC call failed too, the counter fell back to the broadcast
+    nonce, and the next voucher reused it (nonce_too_low) although the first
+    tx had settled.
+    """
+    eth = FakeEth(pending=5)
+
+    def flaky_receipt(tx_hash, timeout):
+        raise RuntimeError("429 Client Error: Too Many Requests")
+
+    eth.wait_for_transaction_receipt = flaky_receipt
+    r = _relayer(eth=eth)
+    first = _relay(r, 1)
+    assert first.failure == R.FAIL_RECEIPT
+    assert first.txNonce == 5
+    assert first.nonceResyncs == 0
+
+    eth.wait_for_transaction_receipt = FakeEth.wait_for_transaction_receipt.__get__(eth)
+    eth.pending = 5  # a lagging node would still report 5
+    second = _relay(r, 2)
+    assert second.txNonce == 6, "nonce 5 was handed out twice"
