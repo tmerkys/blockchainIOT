@@ -161,6 +161,10 @@ def create_app(relayer: Relayer | None = None) -> FastAPI:
             content={"accepted": False, "submitted": False, "reason": reason},
         )
 
+    if app.state.relayer.config.pipeline:  # exp/concurrency; off by default
+        # Registered first, so it shadows the default route below.
+        _register_pipelined_voucher(app)
+
     @app.post("/voucher", response_model=RelayResult)
     async def post_voucher(req: VoucherRequest, request: Request) -> RelayResult:
         """Verify a signed voucher and build its settlement transaction.
@@ -224,6 +228,46 @@ def create_app(relayer: Relayer | None = None) -> FastAPI:
         }
 
     return app
+
+
+# --- pipelining mode (exp/concurrency; GATEWAY_PIPELINE=1, off by default) ---
+
+HTTP_BAD_GATEWAY = 502
+
+
+def _register_pipelined_voucher(app: FastAPI) -> None:
+    """`POST /voucher` for pipelining mode.
+
+    The default handler is `async def` around a blocking `relay()`, so the
+    event loop runs one voucher at a time — the measured one-settle-per-block
+    ceiling. This one is a plain `def`, which FastAPI runs in its thread pool,
+    so K devices' vouchers are relayed concurrently; the relayer's
+    `NonceManager` keeps their transaction nonces apart.
+
+    A voucher that was accepted but whose transaction failed to broadcast or
+    to be mined comes back as 502 with the full `PipelinedResult` (its
+    `failure` field names the status), so a device can record *why*. A mined
+    but reverted settle keeps the default path's 200 + `reason`.
+    """
+    # Imported here so the default path's imports are unchanged.
+    from gateway.relayer import FAIL_REVERTED, PipelinedResult
+
+    @app.post("/voucher", response_model=PipelinedResult)
+    def post_voucher_pipelined(req: VoucherRequest, request: Request) -> Any:
+        relayer: Relayer = request.app.state.relayer
+        result = relayer.relay(
+            req.voucher,
+            HexBytes(req.sigDevice),
+            HexBytes(req.sigMerchant) if req.sigMerchant else None,
+            close=req.close,
+            t0=req.t0,
+            t1=req.t1,
+            t2=getattr(request.state, "t2", None),
+        )
+        result.t6 = time.time()
+        if result.failure and result.failure != FAIL_REVERTED:
+            return JSONResponse(status_code=HTTP_BAD_GATEWAY, content=result.model_dump(mode="json"))
+        return result
 
 
 app = create_app()
