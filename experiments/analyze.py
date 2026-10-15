@@ -68,7 +68,7 @@ TERMS = [
 CPU_METRICS = ["cpu_sign_ms", "cpu_device_ms", "cpu_countersign_ms"]
 METRICS = (
     ["latency_ms"] + [t for t, _ in TERMS]
-    + ["confirm_ms", "clock_offset_ms", "gasUsed", "fee_wei"] + CPU_METRICS
+    + ["confirm_ms", "sealed_ms", "clock_offset_ms", "gasUsed", "fee_wei"] + CPU_METRICS
 )
 
 TRANSPORT_LABEL = {"eth": "Ethernet", "wifi": "WiFi", "ble": "Bluetooth"}
@@ -122,6 +122,13 @@ def load(results_dir: Path) -> pd.DataFrame:
     df["build_ms"] = (df["t3"] - df["t2"]) * 1000
     df["inclusion_ms"] = (df["t4"] - df["t3"]) * 1000
     df["confirm_ms"] = (df["t5"] - df["t4"]) * 1000
+    # On Base, t4 is a Flashblocks pre-confirmation: the RPC returns the receipt
+    # from a 200 ms sub-block, 0.8-1.5 s *before* the 2 s block is sealed (checked
+    # against block timestamps, docs/measurements.md 2026-10-15). t5 (1 confirmation
+    # = eth_blockNumber reached the receipt's block, polled every 200 ms) is the
+    # sealed block. On L1 the two coincide. `sealed_ms` is the latency to it —
+    # device span plus a gateway-internal span, so still no cross-machine clock.
+    df["sealed_ms"] = df["latency_ms"] + df["confirm_ms"]
     df["other_ms"] = df["latency_ms"] - df[["signing_ms", "network_ms", "build_ms", "inclusion_ms"]].sum(axis=1)
     df["fee_wei"] = df["gasUsed"] * df["effectiveGasPrice"] + df["l1Fee"].fillna(0)
     return df
@@ -222,13 +229,13 @@ def welch(df: pd.DataFrame) -> pd.DataFrame:
         rows += _welch_rows(
             g[g["chain"] == "base-sepolia"], g[g["chain"] == "sepolia"],
             "base-sepolia", "sepolia", transport, config,
-            ["latency_ms", "inclusion_ms", "build_ms", "gasUsed"],
+            ["latency_ms", "sealed_ms", "inclusion_ms", "build_ms", "gasUsed"],
         )
     return pd.DataFrame(rows)
 
 
 def print_summary(summary: pd.DataFrame, tests: pd.DataFrame) -> None:
-    show = ["latency_ms"] + [t for t, _ in TERMS] + ["clock_offset_ms", "gasUsed"] + CPU_METRICS
+    show = ["latency_ms", "sealed_ms"] + [t for t, _ in TERMS] + ["clock_offset_ms", "gasUsed"] + CPU_METRICS
     order = {k: i for i, k in enumerate(condition_order(summary))}
     groups = sorted(summary.groupby(KEYS, sort=False), key=lambda kg: order[kg[0]])
     for key, g in groups:

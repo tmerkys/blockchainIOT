@@ -596,7 +596,8 @@ All in ms. gasUsed 77,290, total fee ≈ 4.65e11 wei per settle (unchanged by co
   link. That is a device-configuration finding for ch. 4: an IoT agent left with stock power
   management pays it on every reply, and disabling power save costs energy (an M7 question).
 - **Where the second goes, controlled:** ~70% gateway↔RPC round trips (`t3-t2` ≈ 705 ms), ~23%
-  L2 inclusion (≈ 215–240 ms, half a block period on average as expected), ~2% signing, ~1%
+  L2 inclusion (≈ 215–240 ms, half a block period on average as expected — **wrong, corrected
+  2026-10-15 below: on Base this is a Flashblocks pre-confirmation, not block inclusion**), ~2% signing, ~1%
   network. The chain is not the bottleneck; the public RPC endpoint is.
 - Kurt et al. (2021) WiFi reference: 2.6 s. Ours: 0.98 s on WiFi with on-chain settlement per tick.
 
@@ -809,3 +810,104 @@ offset diagnostic moved. Before the next session: `w32tm /resync` from an elevat
 
 ### Budget after
 Gateway holds **77,624,533,793,983 wei** (~0.000078 ETH) on Base Sepolia.
+
+## Correction — Base `t4` is a Flashblocks pre-confirmation, not a sealed block (2026-10-15)
+Found while designing the H2 throughput run. The note above ("L2 inclusion ≈ 215–240 ms, half a
+block period") cannot be right: half of Base's 2 s block period is 1 s, not 230 ms.
+
+**Check:** each run's `t4` (receipt received) against the timestamp of the block its receipt names,
+all M5 sessions (`eth_getBlockByNumber`, Base Sepolia and Ethereum Sepolia publicnode):
+
+| chain | `t4` − block timestamp (median per session) | runs with `t4` before the block's timestamp |
+|---|---|---|
+| Base Sepolia (5 sessions) | −1.55, −1.28, −1.04, −0.88, −0.82 s | 100%, 100%, 100%, 100%, 90% |
+| Ethereum Sepolia (2 sessions) | +0.84, +0.96 s | 0%, 0% |
+
+On Base the gateway holds a receipt 0.8–1.5 s before the block containing the transaction is
+sealed. That is Base **Flashblocks**: the sequencer streams 200 ms sub-blocks, and Flashblocks-aware
+RPC nodes return receipts for pre-confirmed transactions. Base Sepolia has Flashblocks and Base's
+public endpoints are Flashblocks-enabled (Base docs; QuickNode, GetBlock docs). (The 2026-10-15
+session's smaller lead is partly the laptop clock being ~0.48 s off, see the M7 entry.) `t5`
+(1 confirmation: `eth_blockNumber` ≥ the receipt's block, polled every 200 ms) lands 0.2–0.7 s after
+the block timestamp — that is the sealed block. On L1 `t4` and `t5` coincide (~0.1 s apart).
+
+**Consequences.**
+- On Base, reported latency `t4 − t0` is **time to sequencer pre-confirmation**, and `t4 − t3` is
+  pre-confirmation wait, not block inclusion. The relayer's docstring ("CONFIRMATIONS=1 stamps t5
+  immediately and t5 − t4 is ~0") holds on L1 and not on Base.
+- `analyze.py` now also reports **`sealed_ms` = latency + (t5 − t4)**, time to the sealed block
+  (still one device span + one gateway span, no cross-machine clock). Controlled config:
+
+| | L2 eth | L2 wifi (n=60) | L1 eth | L1 wifi |
+|---|---|---|---|---|
+| to pre-confirmation (`t4`) | 957.5 ± 54.5 | 966.5 ± 48.3 | — | — |
+| to sealed block (`t5`) | **2292.7 ± 228.3** | **2419.4 ± 168.4** | 8256.4 ± 1455.0 | 8825.0 ± 1354.9 |
+
+  L1 − L2 to a sealed block: +6.0 s (eth, p = 2.7e-09), +6.4 s (wifi, p = 1.2e-10): L1 is ~3.6×
+  slower to a sealed block, vs ~8.5× when L2 is counted to pre-confirmation.
+- **H1 holds on either definition** (both L2 figures are low seconds). The thesis must say which it
+  reports, and present both. Neither is finality: a Base block is final once its batch is posted and
+  finalised on L1 (minutes), an Ethereum block after two epochs (~13 min). Finality was not measured.
+- No raw data changes; only the interpretation of `t4` on Base, and the added `sealed_ms`.
+
+## H2 throughput — 3-of-3 vs single-signature baseline (2026-10-15)
+- Code: commit **e831b13** (`experiments/throughput.py`, test-only baseline
+  `contracts/test/baseline/SingleSigChannel.sol` = `PaymentChannel` with the device signature as
+  the only check: a classic unidirectional channel). Outputs: `experiments/analysis/throughput.json`,
+  `throughput_onchain.csv`, `throughput_gateway.csv`.
+- "Without destroying throughput" is measured as the difference between the two contracts, three ways.
+
+### 1. On chain (eth_simulateV1, read-only; prices = cost table 2026-10-14)
+Controls: simulated 3-of-3 later settle 77,217 vs 77,290 real (Base Sepolia), 88,333 vs 88,365 real
+(Ethereum Sepolia) — both ok.
+
+| per later `settle()` | single-sig | 3-of-3 | difference |
+|---|---|---|---|
+| gas (Ethereum mainnet / Base mainnet) | 62,929 / 62,925 | 77,233 / 77,229 | **+14,304 (+22.7%)** |
+| calldata | 324 B | 644 B | +320 B (2 × [offset + length + 65 B padded to 96]) |
+| Base L1 data fee (median of 25 paired blocks) | 1.95e9 wei | 2.92e9 wei | +50% |
+| EUR, Ethereum mainnet | €0.016316 | €0.020025 | +22.7% |
+| EUR, Base mainnet | €0.000846 | €0.001039 | +22.9% |
+| settles per block (gas limit 60M / 400M) | 953 / 6,356 | 776 / 5,179 | **−18.5%** |
+
+The 3-of-3 settle euro figures reproduce the cost table (€0.0200 / €0.00104). Settles per block is
+a ceiling — a whole block for this contract — and matters as a ratio: the 3-of-3 costs ~19% of the
+chain's capacity for this operation. First settle on a channel (Ethereum mainnet): 97,129 → 111,429 gas (the same +14,300).
+
+### 2. Gateway work per voucher (laptop, one core, N = 1000, perf_counter_ns)
+| step | ms, mean ± 95% CI |
+|---|---|
+| verify device signature | 6.36 ± 0.06 |
+| verify merchant signature | 6.43 ± 0.06 |
+| co-sign (gateway) | 5.22 ± 0.06 |
+| encode settle, 3 sigs / 1 sig | 0.99 / 0.72 |
+| **path, 3-of-3 / single-sig** | **19.00 ± 0.15 / 7.07 ± 0.07** |
+
+→ one core processes **53 vouchers/s** under 3-of-3 vs 141/s single-sig (2.7×). Python
+(eth-account, pure-Python keccak/ECDSA paths) on the gateway laptop; a native library would be far
+faster — the ratio, not the absolute rate, is the H2 figure.
+
+### 3. Live pipeline, back to back (Base Sepolia, WiFi, controlled, N = 30)
+- `runner.py --experiment tp --transport wifi --n 30 --gap-min 0 --gap-max 0`, commit e831b13 both
+  machines; data `tp_base-sepolia_wifi_20261015T151335Z-82665d.csv` (prefix `tp_`, so `analyze.py`
+  never pools it with spaced runs). Channel nonces 159–188. **30/30 ok.**
+- **0.50 settled payments/s** (30 in 59.6 s, one every 1.99 s); **exactly one settle in each of 30
+  consecutive blocks.** The gateway answers only after `t5` (sealed block, see the correction above),
+  and the device sends the next voucher only after the answer, so the prototype pipeline is bound
+  to one settlement per Base block (2 s). That is the gateway's sequential design (wait for the
+  receipt, fresh tx nonce each time), not the 3-of-3: a pipelining gateway (local nonce counter,
+  not waiting per voucher) would lift it toward the on-chain ceiling in §1.
+- Latency back to back 924.3 ± 41.2 ms vs 966.5 spaced (n = 60): Welch p = 0.18 — sustained load does
+  not slow the individual payment.
+
+### Reading this (H2)
+The 3-of-3 has a real, bounded price: +22.7% gas and −18.5% settles per block on chain, 2.7× the
+gateway's per-voucher CPU (53/s/core). None of these is what limits this system: the prototype
+gateway settles once per L2 block (0.5/s), and with the M4 channel each settlement carries up to
+200 ticks, so micropayment throughput is set by off-chain voucher rate — the Pi signs at ~74/s
+(13.5 ms, M7) and the gateway verifies at 53/s per core. The 3-of-3 lowers throughput by a constant
+factor; it does not destroy it. Not measured: multiple devices or gateways, concurrent channels,
+a pipelining gateway.
+
+### Budget after
+Gateway holds **63,712,081,784,370 wei** (~0.000064 ETH) on Base Sepolia.
