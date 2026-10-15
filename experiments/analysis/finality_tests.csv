@@ -1,0 +1,7 @@
+scope,config,a,b,metric,mean_a,mean_b,diff_b_minus_a,t,df,p
+wifi,controlled,base-sepolia@base-sepolia-rpc.publicnode.com,sepolia@ethereum-sepolia-rpc.publicnode.com,safe_ms,121945,589985,468040,22.3214,31.023,1.13458e-20
+wifi,controlled,base-sepolia@base-sepolia-rpc.publicnode.com,sepolia@ethereum-sepolia-rpc.publicnode.com,finalized_ms,1.04889e+06,972890,-75998.8,-3.03913,56.7351,0.00358454
+wifi,controlled,base-sepolia@base-sepolia-rpc.publicnode.com,sepolia@ethereum-sepolia-rpc.publicnode.com,finality_ms,1.04973e+06,980427,-69303.5,-2.76806,56.6417,0.00760633
+wifi,controlled,base-sepolia@base-sepolia.g.alchemy.com,sepolia@ethereum-sepolia-rpc.publicnode.com,safe_ms,76274.9,589985,513710,24.502,31.0109,7.41336e-22
+wifi,controlled,base-sepolia@base-sepolia.g.alchemy.com,sepolia@ethereum-sepolia-rpc.publicnode.com,finalized_ms,1.30981e+06,972890,-336918,-13.3682,57.958,2.34578e-19
+wifi,controlled,base-sepolia@base-sepolia.g.alchemy.com,sepolia@ethereum-sepolia-rpc.publicnode.com,finality_ms,1.31065e+06,980427,-330223,-13.0868,57.866,6.13245e-19

@@ -984,3 +984,36 @@ for pre-confirmation latency; for sealed-block latency the block period dominate
 
 ### Budget after
 Base Sepolia gateway **35,885,856,870,265 wei** (60 settles: 2.78e13 wei, within the 2.79e13 estimate).
+
+## Session v2-2 — L1 time to finality: Ethereum Sepolia, WiFi, controlled, N=30 (2026-10-15)
+- Commit **615d34d** both machines. Gateway `--env-file .env.sepolia` (host ethereum-sepolia-rpc.publicnode.com),
+  contract `0xd0D2…7766`, channel `0x8800…4685`, nonces 63–92, gap 12–24 s. Controlled per row. Laptop −0.13 s vs
+  time.cloudflare.com before the start (clock-offset diagnostic +120.7 ms); Pi chrony 0.06 ms. Started
+  automatically under the user's pre-approval ("if all checks pass, clock within 0.5 s"); all checks passed.
+- Data: `v2_sepolia_wifi_20261015T170546Z-064c00.csv` — **30/30 ok**; observer (`--rpc-env .env.sepolia`, poll 2 s)
+  `fin_sepolia_wifi_20261015T170601Z-487aca.csv` — **30/30 finalized**, 0 tag regressions, 0 RPC errors.
+
+### Latency vs the results-v1 L1 WiFi session (same condition, prefix v2, not pooled)
+Latency 7537.0 ms mean (sd 3482.6) vs 8736.4 ± 1354.8: Welch p = 0.20 — no contradiction (L1 latency is
+dominated by the slot position). Inclusion 6951 vs 8009 ms, p = 0.25. **Build + broadcast 542 vs 682 ms,
+p = 2.5e-11** on the same publicnode endpoint: the public RPC answered ~140 ms faster today. Not a change in
+any conclusion (build was and is ~7% of L1 latency) but a day-to-day RPC effect, noted as such.
+
+### Time to finality (ms after `t4`, mean ± 95% CI, n; Welch vs Base per Base observer)
+| | `safe` | `finalized` | median finalized | range |
+|---|---|---|---|---|
+| **L1 Ethereum Sepolia** (publicnode, n = 30) | 589,985 ± 42,162 | **972,890 ± 42,128** | 977,119 | 791,080 – 1,150,553 |
+| L2 Base Sepolia, publicnode observer (n = 60, v2-1) | 121,945 ± 7,672 | 1,048,889 ± 28,373 | 1,066,670 | 838,032 – 1,209,582 |
+| L2 Base Sepolia, Alchemy observer (n = 60, v2-1) | 76,275 ± 7,650 | 1,309,808 ± 29,060 | 1,311,835 | 1,113,314 – 1,487,064 |
+
+- **L1 finalizes in ~16.2 min** (two epochs ≈ 12.8 min plus slot position and the epoch boundary; `safe` ~9.8 min).
+- **L2 Base finalizes *later* than L1**: +76.0 s vs the publicnode observer (p = 3.6e-03), +336.9 s vs Alchemy
+  (p = 2.3e-19). Expected from the rollup design — a Base block is final only once its batch is posted to L1
+  and that L1 block finalizes — but it is the reverse of the latency ranking: **L2 is ~1 s to pre-confirmation
+  and ~2.3 s to a sealed block, yet ~1–5 min slower than L1 to finality.** `safe` is the other way round:
+  Base 1.3–2 min, L1 ~9.8 min (p ≈ 1e-20).
+- Sensor event → finality (`finality_ms`): L1 980,427 ± 42,204 ms; Base 1,049,731 ± 28,371 (publicnode).
+- Different days are not involved: both chains measured 2026-10-15, ~25 min apart.
+
+### Budget after
+Ethereum Sepolia gateway **49,966,419,633,186,568 wei** (30 settles: 2.65e12 wei, as estimated).
