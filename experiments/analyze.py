@@ -60,7 +60,7 @@ TERMS = [
     ("signing_ms", "Signing (Pi)"),
     ("network_ms", "Network, both legs"),
     ("build_ms", "Gateway build + broadcast"),
-    ("inclusion_ms", "Block inclusion"),
+    ("inclusion_ms", "Inclusion (Base: pre-confirmation)"),
     ("other_ms", "Other (countersign, framing)"),
 ]
 # Device CPU time per run (run_batch.py docstring): the M7 fallback, a proxy for
