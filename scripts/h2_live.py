@@ -43,6 +43,7 @@ from eth_account.messages import encode_typed_data  # noqa: E402
 from hexbytes import HexBytes  # noqa: E402
 from web3 import Web3  # noqa: E402
 from web3.exceptions import ContractLogicError  # noqa: E402
+from shared.rpc import rpc_host  # noqa: E402
 from web3.logs import DISCARD  # noqa: E402
 
 from gateway.relayer import Relayer, RelayerConfig  # noqa: E402
@@ -127,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     gw = Account.from_key(gateway_key)
 
     print("=== setup =========================================================")
-    print(f"  chain            {chain_id} via {rpc_url}")
+    print(f"  chain            {chain_id} via {rpc_host(rpc_url)}")
     print(f"  contract         {contract_addr}")
     print(f"  gateway (attacker) {gw.address}")
 

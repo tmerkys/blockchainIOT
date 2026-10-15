@@ -911,3 +911,27 @@ a pipelining gateway.
 
 ### Budget after
 Gateway holds **63,712,081,784,370 wei** (~0.000064 ETH) on Base Sepolia.
+
+## RPC benchmark — publicnode vs dedicated (Alchemy), read-only (2026-10-15)
+- Code: commit **0499e26** (`experiments/rpc_bench.py`). Data: `experiments/analysis/rpc_bench_base-sepolia_20261015T161129Z.csv`
+  (every call) and `.json` (medians). Host only is recorded; the dedicated URL is read by name
+  (`BASE_SEPOLIA_DEDICATED_RPC_URL`, gitignored `.env`) and never written anywhere.
+- Method as in M3 cleanup §2: the relayer's four pre-broadcast calls in its order, one kept-alive
+  session per endpoint, 3 warm-up repetitions, then N = 50 repetitions, endpoints interleaved, 0.5 s
+  pause. `eth_estimateGas` is of a read-only `channels()` call on the M5 contract (the real
+  `settle()` estimate needs three valid signatures). Laptop, home link, Base Sepolia.
+
+| call (median ms, p10–p90) | publicnode | Alchemy |
+|---|---|---|
+| `eth_getTransactionCount` | 71.8 (66.7–85.2) | 51.7 (47.9–57.4) |
+| `eth_estimateGas` | 207.5 (201.5–220.8) | 156.6 (150.0–177.5) |
+| `eth_getBlockByNumber(latest)` | 77.0 (70.4–83.6) | 52.2 (48.3–58.7) |
+| `eth_maxPriorityFeePerGas` | 69.0 (65.6–74.3) | 51.4 (47.2–56.0) |
+| **sum of the four** | **429.2 (414.3–451.0)** | **314.1 (301.2–359.3)** |
+
+0 failures on either. Read-only Flashblocks hint: `pending` was one block ahead of `latest` in
+10/10 probes on **both** endpoints, which suggests both serve pre-confirmed state. Whether Alchemy
+returns pre-confirmed *receipts* is decided only by a live session (per-row `t4_preconf`).
+Not a latency result: no transaction was sent; `eth_sendRawTransaction` and the receipt wait are not
+in these numbers. publicnode's sum is higher than the 328 ms in M3 cleanup (different estimate
+target, different day).

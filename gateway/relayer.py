@@ -33,6 +33,7 @@ from pydantic import BaseModel
 from web3 import Web3
 from web3.exceptions import ContractLogicError
 
+from shared.rpc import redact, rpc_host
 from shared.voucher import Voucher
 
 log = logging.getLogger(__name__)
@@ -161,6 +162,18 @@ class RelayerConfig:
     confirmations: int = 1
     rpc_timeout: float = RPC_TIMEOUT_S
 
+    # --- exp/rpc: per-row receipt definition check -------------------------
+    record_block_timestamp: bool = True
+    """After t5, read the receipt block's timestamp (one `eth_getBlockByNumber`).
+
+    Outside the measured span: it runs after t5, and the device's reported
+    latency subtracts everything between t4 and t6. Lets the analysis tell a
+    Flashblocks pre-confirmation (receipt before the block's timestamp) from a
+    sealed-block receipt, per row (docs/measurements.md, 2026-10-15
+    correction). Env `RECORD_BLOCK_TIMESTAMP=0` turns it off.
+    """
+    # --- end exp/rpc ------------------------------------------------------
+
     submit: bool = False
     """Broadcast `settle()`, or stop once the calldata is built?
 
@@ -228,6 +241,9 @@ class RelayerConfig:
             confirmations=integer("CONFIRMATIONS", defaults.confirmations),
             rpc_timeout=number("RPC_TIMEOUT_S", defaults.rpc_timeout),
             submit=boolean("GATEWAY_SUBMIT", defaults.submit),
+            record_block_timestamp=boolean(
+                "RECORD_BLOCK_TIMESTAMP", defaults.record_block_timestamp
+            ),
         )
 
 
@@ -284,6 +300,18 @@ class RelayResult(BaseModel):
     # Nothing is ever computed by subtracting it from a device-side mark.
     t6: float | None = None  # gateway: response handed back to the transport
 
+    # --- exp/rpc: which RPC answered, and which receipt definition it used ---
+    # Host only, never the URL: a dedicated endpoint's URL carries its API key.
+    rpcHost: str | None = None
+    # Timestamp (chain clock, integer seconds) of the block the receipt names,
+    # read after t5. A receipt held before this instant is a pre-confirmation.
+    blockTimestamp: int | None = None
+    # First `eth_blockNumber` the gateway saw after the receipt (the first t5
+    # poll). Below `blockNumber` means the receipt arrived before its block was
+    # the node's head — a pre-confirmation, decided without any clock.
+    headAtReceipt: int | None = None
+    # --- end exp/rpc ------------------------------------------------------
+
 
 class Relayer:
     """Verifies vouchers and turns them into `settle()` transactions.
@@ -309,6 +337,11 @@ class Relayer:
             if self.config.gateway_private_key
             else None
         )
+
+    @property
+    def rpc_host(self) -> str | None:
+        """Host of the configured RPC endpoint — the only part of it ever shown."""
+        return rpc_host(self.config.rpc_url)
 
     @property
     def gateway_address(self) -> str | None:
@@ -459,7 +492,9 @@ class Relayer:
         """
         target = block_number + self.config.confirmations - 1
         deadline = time.monotonic() + RECEIPT_TIMEOUT_S
-        while self.w3.eth.block_number < target:
+        while (head := self.w3.eth.block_number) < target:
+            if result.headAtReceipt is None:
+                result.headAtReceipt = head  # exp/rpc: first poll only
             if time.monotonic() > deadline:
                 log.warning(
                     "timed out waiting for %d confirmations on block %d; t5 left unset",
@@ -469,6 +504,8 @@ class Relayer:
                 return
             time.sleep(CONFIRMATION_POLL_S)
         result.t5 = time.time()
+        if result.headAtReceipt is None:
+            result.headAtReceipt = head  # exp/rpc: head was already there at t4
 
     def _submit(self, tx: dict[str, Any], result: RelayResult) -> RelayResult:
         """Broadcast `settle()`, wait for the receipt, stamp t3-t5.
@@ -542,7 +579,30 @@ class Relayer:
             result.gasUsed,
         )
         self._await_confirmations(receipt["blockNumber"], result)
+        self._record_block_timestamp(result)  # exp/rpc: after t5, outside the span
         return result
+
+    # --- exp/rpc: receipt definition check, after the measured span ---------
+
+    def _record_block_timestamp(self, result: RelayResult) -> None:
+        """Read the receipt block's timestamp into `result`, best effort.
+
+        A failure leaves it None and costs the row nothing else: the
+        settlement is already sealed and its marks are already stamped.
+        """
+        if not self.config.record_block_timestamp or result.blockNumber is None:
+            return
+        try:
+            block = self.w3.eth.get_block(result.blockNumber)
+            result.blockTimestamp = receipt_int(block["timestamp"])
+        except Exception as exc:  # noqa: BLE001 — diagnostic only
+            log.warning(
+                "could not read timestamp of block %s: %s",
+                result.blockNumber,
+                redact(str(exc), self.config.rpc_url),
+            )
+
+    # --- end exp/rpc --------------------------------------------------------
 
     # --- entry point --------------------------------------------------------
 
@@ -592,6 +652,7 @@ class Relayer:
             t0=t0,
             t1=t1,
             t2=t2,
+            rpcHost=self.rpc_host,  # exp/rpc
         )
         return self._submit(tx, result)
 
@@ -623,7 +684,9 @@ class Relayer:
                 closed,
             ) = self._contract.functions.channels(address).call()
         except Exception as exc:
-            raise RelayerNotReady(f"could not read channel {address}: {exc}") from exc
+            raise RelayerNotReady(
+                f"could not read channel {address}: {redact(str(exc), self.config.rpc_url)}"
+            ) from exc
 
         return {
             "channel": address,
@@ -664,10 +727,11 @@ class Relayer:
                 self.w3.eth.get_code(to_checksum_address(self.config.payment_channel))
             )
         except Exception as exc:
-            rpc_error = str(exc)
+            rpc_error = redact(str(exc), self.config.rpc_url)
 
         return {
-            "rpcUrl": self.config.rpc_url,
+            # Host only (exp/rpc): a dedicated endpoint's URL is a credential.
+            "rpcHost": self.rpc_host,
             "rpcReachable": observed is not None,
             "rpcError": rpc_error,
             "chainId": self.config.chain_id,

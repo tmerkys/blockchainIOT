@@ -182,6 +182,11 @@ def build_record(
         "cpu_sign_ms": ns_to_ms(cpu.get("sign")),
         "cpu_countersign_ms": ns_to_ms(cpu.get("countersign")),
         "cpu_device_ms": ns_to_ms(cpu.get("device")),
+        # exp/rpc: gateway's RPC host (never its URL) and the receipt-definition
+        # check — block timestamp (chain clock) and head height at receipt time.
+        "rpcHost": result.get("rpcHost"),
+        "blockTimestamp": result.get("blockTimestamp"),
+        "headAtReceipt": result.get("headAtReceipt"),
     }
 
 

@@ -47,6 +47,10 @@ import pandas as pd  # noqa: E402
 from scipy import stats  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from shared.rpc import BASELINE_PROVIDER, provider_of  # noqa: E402  (exp/rpc)
 RESULTS_DIR = REPO_ROOT / "experiments" / "results"
 OUT_DIR = REPO_ROOT / "experiments" / "analysis"
 
@@ -131,7 +135,195 @@ def load(results_dir: Path) -> pd.DataFrame:
     df["sealed_ms"] = df["latency_ms"] + df["confirm_ms"]
     df["other_ms"] = df["latency_ms"] - df[["signing_ms", "network_ms", "build_ms", "inclusion_ms"]].sum(axis=1)
     df["fee_wei"] = df["gasUsed"] * df["effectiveGasPrice"] + df["l1Fee"].fillna(0)
+    df = add_rpc_columns(df)  # exp/rpc
     return df
+
+
+# --- exp/rpc: provider dimension and the per-row receipt definition ----------
+#
+# The RPC provider is a condition dimension, but it is NOT added to KEYS:
+# summary.csv / tests.csv / the figures keep their (chain, transport, config)
+# keys and are computed from baseline-provider (publicnode) rows only — every
+# row before the `rpcHost` column existed is publicnode, so the published
+# results-v1 tables come out byte-identical. Rows from any other provider go
+# to separate files, rpc_summary.csv and rpc_tests.csv, written only when some
+# condition has more than one provider. No dedicated data -> no change at all.
+
+RPC_METRICS = ["latency_ms", "sealed_ms", "build_ms", "inclusion_ms", "confirm_ms", "t4_lead_ms"]
+RPC_TEST_METRICS = ["sealed_ms", "build_ms"]
+"""Always comparable across providers: sealed block and gateway build+broadcast
+do not depend on whether the provider pre-confirms."""
+RPC_T4_METRICS = ["latency_ms", "inclusion_ms"]
+"""Only comparable when both providers return the same kind of receipt
+(both pre-confirm, or both return sealed receipts) — see `t4_definition`."""
+
+PRECONF_MARGIN_MS = 300.0
+"""|t4_lead_ms| a row must exceed for the block-timestamp check to decide,
+when t4 could be mapped to NTP time through the session's clock offset."""
+PRECONF_MARGIN_RAW_MS = 800.0
+"""Same, when no clock offset is available: the laptop clock alone has drifted
+0.48 s from NTP (docs/measurements.md, 2026-10-15), plus the 300 ms above."""
+PRECONF_GATE = 0.9
+PRECONF_MIN_KNOWN = 10
+
+
+def add_rpc_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Provider per row, and whether its `t4` was a pre-confirmation.
+
+    `provider` comes from `rpcHost` (host only); a missing host is a pre-exp/rpc
+    row and therefore publicnode. `t4_preconf` combines two independent checks:
+
+    * **head** (no clock): the first `eth_blockNumber` after the receipt
+      (`headAtReceipt`) is below the receipt's `blockNumber` — the node handed
+      out a receipt for a block it did not yet have as its head.
+    * **timestamp** (clock-corrected): `t4_lead_ms` = block timestamp − t4,
+      with t4 moved from the laptop clock to NTP time by subtracting the
+      session's median `clock_offset_ms` (gateway − device; the Pi runs chrony,
+      so device time ≈ NTP ≈ sequencer time). Decides only beyond ±300 ms
+      (±800 ms with no offset): Base pre-confirmations lead by 0.8–1.5 s,
+      sealed blocks are seen 0.2–0.7 s after the timestamp.
+
+    Agreeing checks, or one decisive check alone, set the flag; disagreeing
+    checks (e.g. a load-balanced pool whose `eth_blockNumber` lags) leave it NA.
+    Old rows have neither input and stay NA — unknown, not False.
+    """
+    df = df.copy()
+    for col in ("rpcHost", "blockTimestamp", "headAtReceipt"):
+        if col not in df:
+            df[col] = np.nan
+    df["provider"] = df["rpcHost"].map(provider_of)
+    df["rpc_instrumented"] = df["rpcHost"].notna()
+
+    ok = df["status"] == "ok"
+    offset_s = df[ok].groupby("session")["clock_offset_ms"].median() / 1000
+    df["session_offset_s"] = df["session"].map(offset_s)
+    adjusted = df["session_offset_s"].notna()
+    t4_ntp = df["t4"] - df["session_offset_s"].fillna(0.0)
+    df["t4_lead_ms"] = (df["blockTimestamp"] - t4_ntp) * 1000
+    margin = pd.Series(np.where(adjusted, PRECONF_MARGIN_MS, PRECONF_MARGIN_RAW_MS), index=df.index)
+
+    lead = df["t4_lead_ms"]
+    by_ts = pd.Series(pd.NA, index=df.index, dtype="boolean")
+    by_ts[lead > margin] = True
+    by_ts[lead < -margin] = False
+    by_head = pd.Series(pd.NA, index=df.index, dtype="boolean")
+    known_head = df["headAtReceipt"].notna() & df["blockNumber"].notna()
+    by_head[known_head] = df.loc[known_head, "headAtReceipt"] < df.loc[known_head, "blockNumber"]
+
+    flag = by_head.copy()
+    flag[by_head.isna()] = by_ts[by_head.isna()]
+    conflict = (by_head.notna() & by_ts.notna() & (by_head != by_ts)).fillna(False).astype(bool)
+    flag[conflict] = pd.NA
+    flag[~ok] = pd.NA
+    df["t4_preconf"] = flag
+    return df
+
+
+def baseline_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Rows for the main tables: the baseline provider, where a condition has it.
+
+    A condition measured on another provider only (e.g. a local anvil smoke
+    run) keeps its rows, so the main tables still describe it.
+    """
+    has_base = df.groupby(KEYS)["provider"].transform(lambda s: (s == BASELINE_PROVIDER).any())
+    return df[~has_base.astype(bool) | (df["provider"] == BASELINE_PROVIDER)]
+
+
+def rpc_groups(df: pd.DataFrame) -> list[tuple[tuple, dict[str, pd.DataFrame]]]:
+    """Per condition with more than one provider: ok rows of each provider.
+
+    For the baseline, rows that recorded `rpcHost` (same instrumentation, the
+    per-row flag available — typically a same-day control session) are used
+    when the condition has any; otherwise the legacy publicnode rows.
+    """
+    ok = df[df["status"] == "ok"]
+    out = []
+    for key, g in ok.groupby(KEYS):
+        providers = sorted(set(g["provider"]))
+        if len(providers) < 2:
+            continue
+        by: dict[str, pd.DataFrame] = {}
+        for prov in providers:
+            rows = g[g["provider"] == prov]
+            if prov == BASELINE_PROVIDER and rows["rpc_instrumented"].any():
+                rows = rows[rows["rpc_instrumented"]]
+            by[prov] = rows
+        out.append((key, by))
+    return out
+
+
+def _preconf_share(rows: pd.DataFrame) -> tuple[int, float]:
+    known = rows["t4_preconf"].dropna()
+    return len(known), (float(known.astype(bool).mean()) if len(known) else math.nan)
+
+
+def t4_definition(a: pd.DataFrame, b: pd.DataFrame) -> str:
+    """'preconf' / 'sealed' when both groups demonstrably use that receipt
+    kind, else 'mixed' or 'unknown' — and then t4 latency is not compared."""
+    (ka, sa), (kb, sb) = _preconf_share(a), _preconf_share(b)
+    if ka < PRECONF_MIN_KNOWN or kb < PRECONF_MIN_KNOWN:
+        return "unknown"
+    if sa >= PRECONF_GATE and sb >= PRECONF_GATE:
+        return "preconf"
+    if sa <= 1 - PRECONF_GATE and sb <= 1 - PRECONF_GATE:
+        return "sealed"
+    return "mixed"
+
+
+def rpc_summarise(groups) -> pd.DataFrame:
+    rows = []
+    for key, by in groups:
+        for prov, g in by.items():
+            known, share = _preconf_share(g)
+            for metric in RPC_METRICS:
+                rows.append(
+                    {
+                        **dict(zip(KEYS, key)),
+                        "provider": prov,
+                        "hosts": ";".join(sorted(g["rpcHost"].dropna().astype(str).unique())) or "(legacy)",
+                        "metric": metric,
+                        **describe(g[metric]),
+                        "preconf_known": known,
+                        "preconf_share": share,
+                        "sessions": g["session"].nunique(),
+                        "commits": ";".join(sorted(g["commit"].astype(str).str[:7].unique())),
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def rpc_welch(groups) -> pd.DataFrame:
+    rows: list[dict] = []
+    for (chain, transport, config), by in groups:
+        if BASELINE_PROVIDER not in by:
+            continue
+        a = by[BASELINE_PROVIDER]
+        for prov in sorted(set(by) - {BASELINE_PROVIDER}):
+            b = by[prov]
+            definition = t4_definition(a, b)
+            metrics = RPC_TEST_METRICS + (RPC_T4_METRICS if definition in ("preconf", "sealed") else [])
+            for r in _welch_rows(a, b, BASELINE_PROVIDER, prov, f"{chain}/{transport}", config, metrics):
+                rows.append({**r, "t4_definition": definition})
+    return pd.DataFrame(rows)
+
+
+def print_rpc(rsum: pd.DataFrame, rtests: pd.DataFrame) -> None:
+    print("\n== RPC provider comparison (exp/rpc)")
+    for (chain, transport, config, prov), g in rsum.groupby(KEYS + ["provider"], sort=False):
+        first = g.iloc[0]
+        share = "n/a" if math.isnan(first.preconf_share) else f"{first.preconf_share:.0%}"
+        print(f"  {chain}/{transport}/{config}  {prov:<12} n={int(first.n)}  hosts {first.hosts}  "
+              f"t4 pre-confirmed {share} of {first.preconf_known} known")
+        for _, r in g.iterrows():
+            print(f"      {r.metric:<14}{r['mean']:>10.1f} ± {r.ci95:>7.1f}   median {r['median']:>9.1f}")
+    for _, r in rtests.iterrows():
+        print(f"  {r.scope:<20}{r.config:<11}{r.metric:<13} {r.b} - {r.a}: {r.diff_b_minus_a:+10.1f}"
+              f"   t={r.t:+7.2f}  p={r.p:.2g}   (t4: {r.t4_definition})")
+    if not rtests.empty and not rtests["metric"].isin(RPC_T4_METRICS).any():
+        print("  t4 latency not compared: the providers' receipt definitions are not shown to match")
+
+
+# --- end exp/rpc ---------------------------------------------------------------
 
 
 # --- statistics ------------------------------------------------------------
@@ -553,6 +745,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     df = load(args.results)
+    df_all, df = df, baseline_rows(df)  # exp/rpc: main tables = baseline provider
     summary = summarise(df)
     tests = welch(df)
     print_summary(summary, tests)
@@ -569,6 +762,14 @@ def main(argv: list[str] | None = None) -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     summary.to_csv(args.out / "summary.csv", index=False, float_format="%.4f")
     tests.to_csv(args.out / "tests.csv", index=False, float_format="%.6g")
+
+    # exp/rpc: separate outputs, only when a second provider is in the data.
+    groups = rpc_groups(df_all)
+    if groups:
+        rsum, rtests = rpc_summarise(groups), rpc_welch(groups)
+        print_rpc(rsum, rtests)
+        rsum.to_csv(args.out / "rpc_summary.csv", index=False, float_format="%.4f")
+        rtests.to_csv(args.out / "rpc_tests.csv", index=False, float_format="%.6g")
 
     if not args.no_figures:
         style()
