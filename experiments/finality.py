@@ -56,8 +56,11 @@ not grown for `--idle` seconds (default 600: longer than the runner's 150 s
 per-run timeout plus a gap) or `--expect N` rows have arrived; then it keeps
 polling until every transaction is resolved. A transaction is given up
 (`timeout`) `--timeout` seconds after it was added. Defaults per chain come from
-what the publicnode endpoints showed on 2026-10-15 (docs/measurements.md):
-finalized lagged latest by ~18-19 min on both Ethereum Sepolia and Base Sepolia.
+what the publicnode endpoints showed on 2026-10-15, 16:00-16:19 UTC (read-only):
+Ethereum Sepolia `safe` 384-768 s and `finalized` 768-1152 s behind latest
+(sawtooth, one 32-slot epoch per step); Base Sepolia `safe` 60-162 s, and
+`finalized` 854-1110 s on the leading backend (advancing ~190 blocks once per L1
+epoch) but 1216-1460 s on a second backend one step behind it.
 
 **RPC.** `--rpc URL`, else `RPC_URL` from `--rpc-env FILE` (e.g. `.env.sepolia`,
 the gateway's own L1 endpoint), else `$FINALITY_RPC_URL`, else the publicnode
@@ -92,8 +95,8 @@ DEFAULT_RPC = {
     31337: "http://127.0.0.1:8545",
 }
 # Seconds after a transaction is added before it is given up. Observed lag of
-# `finalized` behind `latest` on 2026-10-15: ~18 min (Sepolia), ~19 min (Base
-# Sepolia). About 3x that, so a slow epoch or a late batch is still caught.
+# `finalized` behind `latest` on 2026-10-15: at most ~19 min (Sepolia) and ~24 min
+# (Base Sepolia, lagging backend). 60 min leaves room for a slow epoch or batch.
 DEFAULT_TIMEOUT = {11155111: 3600.0, 84532: 3600.0, 31337: 300.0}
 DEFAULT_TIMEOUT_OTHER = 3600.0
 DEFAULT_POLL = 2.0
