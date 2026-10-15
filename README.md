@@ -1,6 +1,6 @@
 # IoT L2 micropayments — thesis prototype
 
-Artifact for the master's thesis *"Blokų grandinės pagrindu veikiantys finansiniai atsiskaitymai tarp
+Artifact for the master's thesis *"Blokų grandinės pagrindu veikiantis prototipas finansiniams atsiskaitymams tarp
 IoT įrenginių"*. A Raspberry Pi 4 signs EIP-712 payment vouchers for a simulated EV-charging session;
 a gateway on a laptop relays them to a 3-of-3 `PaymentChannel` contract on Base Sepolia (L2) or
 Ethereum Sepolia (L1) and pays the gas. The device never holds chain state or ETH, and the gateway
