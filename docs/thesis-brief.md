@@ -5,7 +5,10 @@ atsiskaitymai tarp IoT įrenginių"* (blockchain-based financial settlement betw
 Prepared 2026-10-14 from the prototype repository (branch `develop`, last data commit `a0ea140`,
 cost table `b2bdc48`, EIP-8037 note `86d1ec1`). Updated 2026-10-15: device CPU-time session
 (code `c602b61`), L2 WiFi controlled pooled to n = 60; H2 throughput (`e831b13`); Base `t4` re-interpreted
-as a Flashblocks pre-confirmation, with time-to-sealed-block added (§4.5).
+as a Flashblocks pre-confirmation, with time-to-sealed-block added (§4.5). Updated 2026-10-16
+(**results-v2**): dedicated RPC endpoint vs public (§4.6), time to finality on L2 and L1 (§4.7),
+concurrent load K = 1–8 devices with a pipelining gateway (§5.3). The results-v1 tables (§4.1–§4.5,
+`summary.csv`, `tests.csv`) are unchanged — the v2 sessions write to separate files.
 
 This brief is the map; the files listed in §10 are the territory. Where they disagree, **the files
 win**, and the disagreement is a bug in this brief.
@@ -15,7 +18,8 @@ win**, and the disagreement is a bug in this brief.
 ## 0. Rules for whoever writes from this
 
 1. **Never invent or round a number into existence.** Every figure in the thesis must trace to a file
-   in §10 (`summary.csv`, `tests.csv`, `costs_2026-10-14.csv`, `measurements.md`). Report means as
+   in §10 (`summary.csv`, `tests.csv`, `costs_2026-10-14.csv`, `rpc_*.csv`, `finality_*.csv`,
+   `concurrency.csv`, `measurements.md`). Report means as
    *mean ± 95% CI (n)*, e.g. *957.5 ± 54.5 ms (n = 30)* — not "about 0.95 s" in a results section.
 2. **Keep the two Pi configurations apart** (*default* vs *controlled*, §4.4). They are different
    conditions; mixing them invalidates the comparison.
@@ -101,8 +105,8 @@ term** (tested against ±500 ms injected skew). Decomposition terms:
 
 | | Hypothesis | Status |
 |---|---|---|
-| H1 | Mean end-to-end latency in the low-seconds range; per-tx cost far below L1 | **Supported** (L2: ~1 s to sequencer pre-confirmation, ~2.3–2.4 s to a sealed block; L1 ~8.2–8.8 s; L2 cost ~19× below L1 per settlement at median price; channel adds ~100×) — §4, §6 |
-| H2 | 3-of-3 channel stops the gateway moving funds unilaterally, without destroying throughput | **Supported.** Security §5.1. Throughput §5.2: the 3-of-3 costs +22.7% gas / −18.5% settles per block and 2.7× gateway CPU per voucher — a constant factor, not the binding limit |
+| H1 | Mean end-to-end latency in the low-seconds range; per-tx cost far below L1 | **Supported** (L2: ~1 s to sequencer pre-confirmation, ~0.8 s with a dedicated RPC, ~2.3–2.4 s to a sealed block; L1 ~8.2–8.8 s; L2 cost ~19× below L1 per settlement at median price; channel adds ~100×) — §4, §6. **Scope:** latency, not finality — Base finalizes ~17.5 min after pre-confirmation, *later* than L1 (~16.2 min) (§4.7) |
+| H2 | 3-of-3 channel stops the gateway moving funds unilaterally, without destroying throughput | **Supported.** Security §5.1. Throughput §5.2: the 3-of-3 costs +22.7% gas / −18.5% settles per block and 2.7× gateway CPU per voucher — a constant factor, not the binding limit. Concurrent load §5.3: with a pipelining gateway, K devices settle K per 2 s block, linear to K = 8 (4.11 settled/s, 0 failures) |
 | H3 | Regulatory (MiCA / PSD2) | Analytical, no code — author's chapter |
 
 ---
@@ -210,8 +214,61 @@ Measured with the process CPU clock (`CLOCK_PROCESS_CPUTIME_ID`, user + system).
   promise; the sealed block follows within the 2 s block period.
 - So the thesis should report both: **~0.96 s to pre-confirmation, ~2.3–2.4 s to a sealed L2 block.**
   The earlier statement "inclusion ≈ half a 2 s block period" was wrong and is corrected here.
-- Neither is finality. A Base block is final once its batch is posted to and finalised on L1 (minutes);
-  an Ethereum block after two epochs (~13 min). **Finality latency was not measured** (§8).
+- Neither is finality. A Base block is final once its batch is posted to and finalised on L1; an
+  Ethereum block after two epochs. Finality was measured in results-v2 — §4.7.
+
+### 4.6 Dedicated RPC endpoint vs public (results-v2, session v2-1)
+Source: `experiments/analysis/rpc_summary.csv`, `rpc_tests.csv`; raw `v2_base-sepolia_wifi_20261015T16*.csv`;
+commit 985c64e. Base Sepolia, WiFi, controlled, 2026-10-15. Two arms back to back, same contract and channel:
+gateway on publicnode (same-day control) vs gateway on a dedicated endpoint (Alchemy, free tier). Not pooled
+with §4.1 — a same-day control, so the day-to-day RPC variation does not enter the comparison.
+
+| mean ± 95% CI (n), ms | publicnode (control) | Alchemy (dedicated) | Alchemy − publicnode, Welch |
+|---|---|---|---|
+| receipt definition | pre-confirmation 30/30 | pre-confirmation 30/30 | like for like |
+| **latency t4 − t0** | 901.0 ± 51.0 (30) | **782.4 ± 46.1 (30)** | **−118.6, p = 8.3e-04** |
+| build + broadcast t3 − t2 | 674.1 ± 25.2 (30) | **542.1 ± 27.8 (30)** | **−132.0, p = 1.5e-09** |
+| t4 − t3 (wait for pre-confirmation) | 187.7 ± 41.5 (30) | 200.5 ± 39.8 (30) | +12.8, p = 0.65 |
+| to sealed block | 2138.3 ± 204.4 (30) | 2190.3 ± 209.4 (30) | +52.0, p = 0.72 |
+
+Findings:
+1. **A dedicated endpoint cuts pre-confirmation latency by ~119 ms (~13%)**, all of it in the gateway's
+   build + broadcast (RPC round trips); the chain-side terms do not move. Confirms §4.2.3: the RPC, not the
+   chain, is the largest L2 latency term to pre-confirmation.
+2. **Time to a sealed block does not change** (p = 0.72): it is set by Base's 2 s block period, not the
+   provider. For sealed-block latency the block period dominates.
+3. The public endpoint itself varies by day: build + broadcast was 692.5 ms in §4.1 (2026-10-14), 674.1 ms
+   here, and 542 ms on Ethereum Sepolia publicnode in v2-2 vs 682 ms in results-v1 (p = 2.5e-11,
+   `measurements.md` v2-2). Hence the same-day control.
+
+### 4.7 Time to finality — L2 vs L1 (results-v2, sessions v2-1, v2-2)
+Source: `experiments/analysis/finality_summary.csv`, `finality_tests.csv`; raw `fin_*.csv` (observer
+`experiments/finality.py`); commits 985c64e (Base), 615d34d (L1). WiFi, controlled, 2026-10-15, both chains
+~25 min apart. Measured in ms **after t4** (the receipt): the time until the provider's `safe` / `finalized`
+block tag first reaches the settlement's block. Base: n = 60 (both v2-1 arms), watched by two observers on
+the same transactions; L1: n = 30. All 150 observations `finalized`; 0 timeouts, 0 reorgs.
+
+| mean ± 95% CI (n), ms after t4 | `safe` | **`finalized`** | median finalized |
+|---|---|---|---|
+| **L1 Ethereum Sepolia** (publicnode observer) | 589,985 ± 42,162 (30) | **972,890 ± 42,128 (30)** | 977,119 |
+| **L2 Base Sepolia**, publicnode observer | 121,945 ± 7,672 (60) | **1,048,889 ± 28,373 (60)** | 1,066,670 |
+| L2 Base Sepolia, Alchemy observer | 76,275 ± 7,650 (60) | 1,309,808 ± 29,060 (60) | 1,311,835 |
+
+Sensor event → finalized (`finality_ms`): L1 980,427 ± 42,204 (30); Base 1,049,731 ± 28,371 (60, publicnode).
+
+Findings:
+1. **L1 finalizes in ~16.2 min** (two epochs ≈ 12.8 min plus slot position and the epoch boundary).
+2. **Base finalizes *later* than L1**: +76.0 s with the publicnode observer (p = 3.6e-03), +336.9 s with
+   Alchemy (p = 2.3e-19). Expected from the rollup design — a Base block is final only once its batch is
+   posted to L1 and that L1 block finalizes — and **the reverse of the latency ranking**: L2 is ~1 s to
+   pre-confirmation and ~2.3 s to a sealed block, but ~1–5 min slower than L1 to finality.
+3. **`safe` is the other way round**: Base 1.3–2 min vs L1 ~9.8 min (p ≈ 1e-20 per observer pair).
+4. **The provider shifts the finality reading by ~4.4 min** (Alchemy − publicnode, finalized +261 s; safe
+   −46 s). A node can only lag the chain's true finality, never lead it, so the earlier report is the closer
+   bound: **Base time to finality ≤ ~17.5 min (mean)**. A gateway that waits for finality on a single
+   provider inherits that provider's lag.
+5. For the thesis: **micropayment UX runs on pre-confirmation or sealed-block latency; finality is the
+   settlement-risk horizon**, and on this L2 it is not shorter than on L1. Report both, do not merge them.
 
 ## 5. Results — security (H2)
 
@@ -274,8 +331,49 @@ design, not the 3-of-3. Per-payment latency under back-to-back load: 924.3 ± 41
 **Reading for H2:** the 3-of-3 costs a constant factor — ~23% more gas, ~19% fewer settlements per
 block, 2.7× the gateway's per-voucher CPU — and none of these is the binding limit. With the channel,
 one settlement carries up to 200 ticks, so micropayment throughput is set by the off-chain voucher
-rate (Pi signs ~74/s at 13.5 ms; gateway verifies 53/s per core). Not measured: several devices or
-gateways, concurrent channels, a pipelining gateway.
+rate (Pi signs ~74/s at 13.5 ms; gateway verifies 53/s per core). Concurrent devices and a pipelining
+gateway: §5.3.
+
+### 5.3 Concurrent load — K devices, pipelining gateway (results-v2, sessions v2-3, v2-4)
+Source: `experiments/analysis/concurrency.csv` (one row per session); raw `cc_base-sepolia_k*_*.csv`;
+driver `experiments/concurrency.py`. Base Sepolia, WiFi, controlled, no gap between a device's runs.
+K device processes **on the Pi** (sharing its 4 cores and WiFi link), each with its own key and its own
+3-of-3 channel (device_i, load gateway, merchant). The gateway **pipelines**: it takes nonces locally and
+broadcasts the next settlement without waiting for the previous receipt. Separate gateway key, so the
+results-v1 nonce sequence is untouched. K = 1–4 and the first K = 8: 2026-10-15, commit c60e32f, Alchemy
+RPC; K = 8 rerun: 2026-10-16, commit 548892d, publicnode RPC.
+
+| K | RPC | ok / attempted | settled/s | settles per block (max) | latency t4 − t0, ms | to sealed block, ms |
+|---|---|---|---|---|---|---|
+| 1 | Alchemy | 30 / 30 | 0.51 | 1.00 (1) | 677.3 ± 43.1 (30) | 1966.9 ± 67.5 (30) |
+| 2 | Alchemy | 30 / 30 | 1.02 | 2.00 (2) | 671.9 ± 42.7 (30) | 1988.2 ± 75.7 (30) |
+| 4 | Alchemy | 40 / 40 | 2.08 | 4.00 (4) | 732.1 ± 54.0 (40) | 1983.4 ± 48.9 (40) |
+| 8 | Alchemy (free tier) | 51 / 80 | 3.86 | 7.29 (8) | 872.8 ± 71.7 (51) | 2024.1 ± 78.9 (51) |
+| **8** | **publicnode** | **64 / 64** | **4.11** | **8.00 (8)** | 941.0 ± 76.6 (64) | 1995.4 ± 63.5 (64) |
+
+Latency/sealed over ok rows; settled/s and settles per block are one value per session (no CI).
+
+Findings:
+1. **Throughput scales linearly with the number of devices: exactly K settlements per 2 s block** for
+   K = 1, 2, 4, 8 (0 failures, 0 nonce resyncs on the clean runs). The one-per-block limit in §5.2 was the
+   prototype's sequential gateway, as stated there; the 3-of-3 contract does not impose it.
+2. **Per-payment latency rises modestly with load**: ~0.67 s at K = 1–2 to ~0.87–0.94 s at K = 8, still
+   below 1 s to pre-confirmation; time to a sealed block stays ~2.0 s at every K.
+3. **The first K = 8 session failed 29/80 on the RPC provider's rate limit**, not on the chain or the
+   contract: 28 HTTP 429 "Too Many Requests" from Alchemy's free tier, plus one consequence of a gateway
+   bug (below). The rerun on publicnode with the same devices, channels and contract: **64/64**. Latency
+   difference between the two K = 8 sessions +68 ms, p = 0.20; sealed −29 ms, p = 0.57 — no contradiction.
+   **Practical point: at ~4 settlements/s a free-tier RPC plan, not the L2, is the first limit to hit.**
+4. **Gateway bug found and fixed under load:** in the pipelining path a receipt-*lookup* error (a 429)
+   released the transaction's nonce although the transaction had been broadcast — and in fact settled
+   on-chain (tx `0x96e030ae…7188`). The re-used nonce then failed `nonce_too_low`. No funds lost, both rows
+   recorded; that session has 52 settlements on-chain, 51 recorded `ok`. Fixed in 548892d (a broadcast
+   transaction's nonce is consumed whatever happens to the receipt poll), with a regression test; the
+   K = 8 rerun ran on the fix. Worth a paragraph in the implementation chapter: nonce management is the
+   hard part of a pipelining relayer.
+5. K = 1 latency here (677 ms, Alchemy) is below §4.6's Alchemy figure (782 ms): the pipelining gateway
+   takes nonces locally and skips one RPC call per settlement. Different gateway code path, not a
+   contradiction.
 
 ---
 
@@ -349,8 +447,9 @@ Glamsterdam on mainnet would raise L1 costs and widen the gap (known direction).
 
 ## 8. Limitations / threats to validity (complete list so far)
 1. **Testnets only**; costs extrapolated to mainnet prices on one date (§6.2), pre-Glamsterdam.
-2. **Public RPC endpoints** (publicnode / mainnet.base.org) dominate L2 latency (~70%); a dedicated
-   endpoint would lower it. Not tested.
+2. **Public RPC endpoints** (publicnode / mainnet.base.org) dominate L2 latency (~70%). A dedicated
+   endpoint was tested (§4.6, −119 ms) — but **one provider (Alchemy), free tier, one session**; other
+   providers and paid tiers may differ.
 3. **One device, one gateway, one LAN, one router**, one session per condition per day; N = 30.
 4. **Cooperative close only** — no unilateral close / challenge period; a counterparty who stops
    signing strands the deposit.
@@ -370,10 +469,19 @@ Glamsterdam on mainnet would raise L1 costs and widen the gap (known direction).
 11. **Simulated sensor** (kWh meter), not a real charger.
 12. **Bluetooth not yet measured; energy only as a CPU-time proxy** (§4.4, §9) — no power meter.
 13. **L2 latency depends on the receipt definition** (§4.5): Base receipts are Flashblocks
-    pre-confirmations; both pre-confirmation and sealed-block latency are reported. **Finality**
-    (L1 batch posting / Ethereum finalisation) **not measured.**
-14. **Throughput**: one device, one gateway, one channel; the prototype gateway settles sequentially
-    (one per L2 block). Multi-device / concurrent-channel load and a pipelining gateway not tested (§5.2).
+    pre-confirmations; both pre-confirmation and sealed-block latency are reported.
+14. **Throughput**: the M5/H2 gateway settles sequentially (one per L2 block, §5.2). Concurrent load
+    (§5.3) used a separate pipelining gateway, K ≤ 8 device processes on **one** Pi, one gateway, one
+    session per level, and two RPC providers across the levels (K = 1–4 Alchemy, K = 8 both). Beyond
+    K = 8 not tested; the ceiling was not reached.
+15. **Finality is measured through provider block tags** (`safe`, `finalized`), polled every 2 s (the
+    resolution), not from the L1 batch-inbox/derivation directly. The reading depends on the provider
+    (~4.4 min apart on Base, §4.7); reported as an upper bound per observer. One session per chain,
+    one day, testnets (Sepolia's finality and Base Sepolia's batch cadence need not match mainnet).
+16. **RPC rate limits**: the free-tier dedicated endpoint returned HTTP 429 at ~4 settlements/s
+    (§5.3). Throughput figures are bounded by the RPC plan as well as the chain.
+17. **Results-v2 sessions are not pooled with results-v1**: they ran on later commits and different
+    days; same-day controls were used where a comparison was made (§4.6).
 
 ---
 
@@ -400,6 +508,10 @@ Glamsterdam on mainnet would raise L1 costs and widen the gap (known direction).
 | `fig_decomposition.pdf/.png` | mean latency by term, per condition |
 | `fig_device_terms.pdf/.png` | signing and network per run (shows governor and power-save effects) |
 | `throughput.json`, `throughput_onchain.csv`, `throughput_gateway.csv` | H2 throughput results (§5.2) |
+| `rpc_summary.csv`, `rpc_tests.csv` | dedicated vs public RPC, per provider, Welch (§4.6) |
+| `finality_summary.csv`, `finality_tests.csv` | time to `safe`/`finalized` per chain and observer, Welch L2 vs L1 (§4.7) |
+| `concurrency.csv` | concurrent load, one row per session and K (§5.3) |
+| `finality.py`, `concurrency.py` | finality observer and concurrent-load driver, for the method chapter |
 | `PaymentChannel.sol`, `VoucherLib.sol` | the contract |
 | `SingleSigChannel.sol` | test-only single-signature baseline for §5.2 (never deployed) |
 | `voucher.py` | EIP-712 voucher definition |
