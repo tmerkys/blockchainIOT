@@ -1,0 +1,13 @@
+chain,transport,config,provider,hosts,metric,n,mean,sd,ci95,ci_low,ci_high,median,min,max,preconf_known,preconf_share,sessions,commits
+base-sepolia,wifi,controlled,alchemy,base-sepolia.g.alchemy.com,latency_ms,30,782.3846,123.4710,46.1048,736.2798,828.4894,767.4605,598.7490,1118.2440,30,1.0000,1,985c64e
+base-sepolia,wifi,controlled,alchemy,base-sepolia.g.alchemy.com,sealed_ms,30,2190.2898,560.8576,209.4277,1980.8622,2399.7175,2123.7991,1187.0008,3208.6216,30,1.0000,1,985c64e
+base-sepolia,wifi,controlled,alchemy,base-sepolia.g.alchemy.com,build_ms,30,542.1166,74.4888,27.8146,514.3020,569.9311,516.8417,483.7720,815.0129,30,1.0000,1,985c64e
+base-sepolia,wifi,controlled,alchemy,base-sepolia.g.alchemy.com,inclusion_ms,30,200.4583,106.6420,39.8208,160.6375,240.2791,207.2536,50.9050,515.2223,30,1.0000,1,985c64e
+base-sepolia,wifi,controlled,alchemy,base-sepolia.g.alchemy.com,confirm_ms,30,1407.9052,513.3757,191.6976,1216.2076,1599.6029,1334.4336,546.7718,2110.5578,30,1.0000,1,985c64e
+base-sepolia,wifi,controlled,alchemy,base-sepolia.g.alchemy.com,t4_lead_ms,30,1187.8489,524.4534,195.8341,992.0148,1383.6830,1190.5119,294.6651,1901.5069,30,1.0000,1,985c64e
+base-sepolia,wifi,controlled,publicnode,base-sepolia-rpc.publicnode.com,latency_ms,30,900.9695,136.4483,50.9506,850.0189,951.9201,923.2725,742.0060,1290.6850,30,1.0000,1,985c64e
+base-sepolia,wifi,controlled,publicnode,base-sepolia-rpc.publicnode.com,sealed_ms,30,2138.2842,547.3785,204.3945,1933.8897,2342.6787,2175.7225,1371.8325,3313.6113,30,1.0000,1,985c64e
+base-sepolia,wifi,controlled,publicnode,base-sepolia-rpc.publicnode.com,build_ms,30,674.1073,67.5042,25.2065,648.9008,699.3138,664.0577,609.0941,1000.3812,30,1.0000,1,985c64e
+base-sepolia,wifi,controlled,publicnode,base-sepolia-rpc.publicnode.com,inclusion_ms,30,187.6504,111.0523,41.4676,146.1828,229.1180,244.1401,68.0432,549.3703,30,1.0000,1,985c64e
+base-sepolia,wifi,controlled,publicnode,base-sepolia-rpc.publicnode.com,confirm_ms,30,1237.3147,551.4677,205.9214,1031.3932,1443.2361,1177.0953,408.0856,2337.1263,30,1.0000,1,985c64e
+base-sepolia,wifi,controlled,publicnode,base-sepolia-rpc.publicnode.com,t4_lead_ms,30,959.1094,525.3116,196.1546,762.9548,1155.2640,975.2871,124.3751,1877.8749,30,1.0000,1,985c64e

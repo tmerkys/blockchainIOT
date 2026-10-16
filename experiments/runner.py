@@ -53,6 +53,11 @@ from pathlib import Path
 from typing import Any, Iterator
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from shared.rpc import provider_of, rpc_host  # noqa: E402  (exp/rpc)
+
 RESULTS_DIR = REPO_ROOT / "experiments" / "results"
 
 PI_ALIAS = "magis-pi"
@@ -112,6 +117,15 @@ RECORD_COLUMNS = [
 """Must match `device/run_batch.py:build_record()` key for key; checked per row.
 The three `cpu_*` columns were added after the M5 L2/L1 sessions (a0ea140);
 earlier CSVs lack them."""
+
+# --- exp/rpc ------------------------------------------------------------------
+RPC_RECORD_COLUMNS = ["rpcHost", "blockTimestamp", "headAtReceipt"]
+"""Added for the dedicated-RPC experiment; earlier CSVs lack them and
+`analyze.py` reads a missing `rpcHost` as publicnode. `rpcHost` is the
+gateway's RPC **host only** — never the URL, which for a dedicated endpoint
+holds the API key. Filled from `/health` when a failed run got no reply."""
+RECORD_COLUMNS = RECORD_COLUMNS + RPC_RECORD_COLUMNS
+# --- end exp/rpc --------------------------------------------------------------
 
 
 def say(msg: str) -> None:
@@ -189,6 +203,16 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
     if not health.get("submit"):
         raise SystemExit("gateway is in calldata-only mode (GATEWAY_SUBMIT=0); nothing would settle")
 
+    # exp/rpc: which RPC the gateway settles through — host only. A gateway
+    # older than exp/rpc reports `rpcUrl`; reduce that to its host here too.
+    gateway_rpc_host = health.get("rpcHost") or rpc_host(health.get("rpcUrl"))
+    provider = provider_of(gateway_rpc_host)
+    say(f"  gateway RPC host {gateway_rpc_host} (provider {provider})")
+    if args.expect_provider and provider != args.expect_provider:
+        raise SystemExit(
+            f"gateway RPC provider is {provider} ({gateway_rpc_host}), expected {args.expect_provider}"
+        )
+
     chain_id = int(health["chainId"])
     chain = CHAINS.get(chain_id, str(chain_id))
     overlay = pi_overlay(chain)
@@ -244,6 +268,7 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
         "contract": health["paymentChannel"],
         "channel": pi_env["CHANNEL_ADDRESS"],
         "addrs": addrs,
+        "rpcHost": gateway_rpc_host,  # exp/rpc
     }
 
 
@@ -333,6 +358,8 @@ def run_session(args: argparse.Namespace, meta: dict[str, Any]) -> Path:
                     raise RuntimeError(
                         f"record shape drifted from runner columns: {sorted(set(record) ^ set(RECORD_COLUMNS))}"
                     )
+                if not record.get("rpcHost"):  # exp/rpc: no reply, so no host from it
+                    record["rpcHost"] = meta.get("rpcHost")
                 writer.writerow({**session_row, **record})
                 fh.flush()
                 statuses[record["status"]] = statuses.get(record["status"], 0) + 1
@@ -371,16 +398,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--experiment",
         default="m5",
-        choices=["m5", "tp"],
-        help="file prefix. m5: the latency conditions analyze.py pools. tp: the H2 "
+        choices=["m5", "tp", "v2"],
+        help="file prefix. m5: the latency conditions analyze.py pools (results-v1). tp: the H2 "
         "back-to-back throughput burst (--gap-min 0 --gap-max 0), which experiments/"
-        "throughput.py reads and analyze.py must not pool with spaced runs",
+        "throughput.py reads and analyze.py must not pool with spaced runs. v2: sessions after "
+        "results-v1 (dedicated RPC + control, L1 finality); analyze.py reads them only for "
+        "rpc_* and finality_* outputs, never for summary.csv/tests.csv",
     )
     parser.add_argument(
         "--results-dir",
         type=Path,
         default=RESULTS_DIR,
         help="where the CSV goes; point smoke runs elsewhere so they never enter the dataset",
+    )
+    parser.add_argument(
+        "--expect-provider",
+        default=None,
+        help="exp/rpc: refuse to start unless the gateway's RPC host maps to this provider "
+        "(e.g. publicnode, alchemy — see shared/rpc.py:provider_of)",
     )
     parser.add_argument(
         "--allow-dirty",

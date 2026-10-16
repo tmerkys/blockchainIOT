@@ -1,0 +1,128 @@
+{
+  "chain": "base-sepolia",
+  "chainId": 84532,
+  "commit": "0499e2610c2038fd0c04c947e934e6df31dac29e",
+  "startedUtc": "2026-10-15T16:11:29+00:00",
+  "finishedUtc": "2026-10-15T16:12:32+00:00",
+  "n": 50,
+  "warmup": 3,
+  "pauseS": 0.5,
+  "calls": [
+    "getTransactionCount",
+    "estimateGas",
+    "getBlock_latest",
+    "maxPriorityFeePerGas"
+  ],
+  "connectionReuse": true,
+  "interleaved": true,
+  "endpoints": {
+    "publicnode": {
+      "host": "base-sepolia-rpc.publicnode.com",
+      "provider": "publicnode",
+      "getTransactionCount": {
+        "median_ms": 71.808,
+        "p10_ms": 66.661,
+        "p90_ms": 85.217,
+        "mean_ms": 78.903,
+        "n": 50,
+        "failed": 0
+      },
+      "estimateGas": {
+        "median_ms": 207.528,
+        "p10_ms": 201.459,
+        "p90_ms": 220.811,
+        "mean_ms": 212.817,
+        "n": 50,
+        "failed": 0
+      },
+      "getBlock_latest": {
+        "median_ms": 76.956,
+        "p10_ms": 70.43,
+        "p90_ms": 83.606,
+        "mean_ms": 78.823,
+        "n": 50,
+        "failed": 0
+      },
+      "maxPriorityFeePerGas": {
+        "median_ms": 69.026,
+        "p10_ms": 65.639,
+        "p90_ms": 74.319,
+        "mean_ms": 69.776,
+        "n": 50,
+        "failed": 0
+      },
+      "total4": {
+        "median_ms": 429.243,
+        "p10_ms": 414.255,
+        "p90_ms": 451.034,
+        "mean_ms": 440.318,
+        "n": 50,
+        "failed": 0
+      },
+      "flashblocksProbe": {
+        "probes": 10,
+        "errors": 0,
+        "pendingAheadOfLatest": 10,
+        "pendingAheadValues": [
+          1
+        ],
+        "pendingTxsMedian": 88.5,
+        "note": "heuristic: pending > latest suggests a Flashblocks-aware node"
+      }
+    },
+    "dedicated": {
+      "host": "base-sepolia.g.alchemy.com",
+      "provider": "alchemy",
+      "getTransactionCount": {
+        "median_ms": 51.672,
+        "p10_ms": 47.89,
+        "p90_ms": 57.35,
+        "mean_ms": 52.092,
+        "n": 50,
+        "failed": 0
+      },
+      "estimateGas": {
+        "median_ms": 156.583,
+        "p10_ms": 150.046,
+        "p90_ms": 177.496,
+        "mean_ms": 165.953,
+        "n": 50,
+        "failed": 0
+      },
+      "getBlock_latest": {
+        "median_ms": 52.16,
+        "p10_ms": 48.267,
+        "p90_ms": 58.712,
+        "mean_ms": 55.12,
+        "n": 50,
+        "failed": 0
+      },
+      "maxPriorityFeePerGas": {
+        "median_ms": 51.389,
+        "p10_ms": 47.226,
+        "p90_ms": 55.955,
+        "mean_ms": 51.987,
+        "n": 50,
+        "failed": 0
+      },
+      "total4": {
+        "median_ms": 314.055,
+        "p10_ms": 301.167,
+        "p90_ms": 359.28,
+        "mean_ms": 325.151,
+        "n": 50,
+        "failed": 0
+      },
+      "flashblocksProbe": {
+        "probes": 10,
+        "errors": 0,
+        "pendingAheadOfLatest": 10,
+        "pendingAheadValues": [
+          1
+        ],
+        "pendingTxsMedian": 93.5,
+        "note": "heuristic: pending > latest suggests a Flashblocks-aware node"
+      }
+    }
+  }
+}

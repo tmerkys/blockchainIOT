@@ -47,6 +47,10 @@ import pandas as pd  # noqa: E402
 from scipy import stats  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from shared.rpc import BASELINE_PROVIDER, provider_of  # noqa: E402  (exp/rpc)
 RESULTS_DIR = REPO_ROOT / "experiments" / "results"
 OUT_DIR = REPO_ROOT / "experiments" / "analysis"
 
@@ -95,10 +99,20 @@ TRANSPORT_COLOR = {"eth": SLOTS[0], "wifi": SLOTS[1], "ble": SLOTS[2]}
 # --- loading ---------------------------------------------------------------
 
 
-def load(results_dir: Path) -> pd.DataFrame:
-    files = sorted(glob.glob(str(results_dir / "m5_*.csv")))
+def load(results_dir: Path, prefix: str = "m5", required: bool = True) -> pd.DataFrame | None:
+    """Every `<prefix>_*.csv` the runner wrote, with the derived columns.
+
+    `m5` feeds summary.csv / tests.csv / the figures — the published results-v1
+    tables. `v2` holds the sessions run after results-v1 (dedicated RPC and its
+    same-day publicnode control, L1 with the finality observer); they only feed
+    the separate rpc_* and finality_* outputs, so the published rows can never
+    move because a later session landed in the same condition.
+    """
+    files = sorted(glob.glob(str(results_dir / f"{prefix}_*.csv")))
     if not files:
-        raise SystemExit(f"no m5_*.csv in {results_dir}")
+        if not required:
+            return None
+        raise SystemExit(f"no {prefix}_*.csv in {results_dir}")
     frames = []
     for f in files:
         d = pd.read_csv(f)
@@ -131,7 +145,195 @@ def load(results_dir: Path) -> pd.DataFrame:
     df["sealed_ms"] = df["latency_ms"] + df["confirm_ms"]
     df["other_ms"] = df["latency_ms"] - df[["signing_ms", "network_ms", "build_ms", "inclusion_ms"]].sum(axis=1)
     df["fee_wei"] = df["gasUsed"] * df["effectiveGasPrice"] + df["l1Fee"].fillna(0)
+    df = add_rpc_columns(df)  # exp/rpc
     return df
+
+
+# --- exp/rpc: provider dimension and the per-row receipt definition ----------
+#
+# The RPC provider is a condition dimension, but it is NOT added to KEYS:
+# summary.csv / tests.csv / the figures keep their (chain, transport, config)
+# keys and are computed from baseline-provider (publicnode) rows only — every
+# row before the `rpcHost` column existed is publicnode, so the published
+# results-v1 tables come out byte-identical. Rows from any other provider go
+# to separate files, rpc_summary.csv and rpc_tests.csv, written only when some
+# condition has more than one provider. No dedicated data -> no change at all.
+
+RPC_METRICS = ["latency_ms", "sealed_ms", "build_ms", "inclusion_ms", "confirm_ms", "t4_lead_ms"]
+RPC_TEST_METRICS = ["sealed_ms", "build_ms"]
+"""Always comparable across providers: sealed block and gateway build+broadcast
+do not depend on whether the provider pre-confirms."""
+RPC_T4_METRICS = ["latency_ms", "inclusion_ms"]
+"""Only comparable when both providers return the same kind of receipt
+(both pre-confirm, or both return sealed receipts) — see `t4_definition`."""
+
+PRECONF_MARGIN_MS = 300.0
+"""|t4_lead_ms| a row must exceed for the block-timestamp check to decide,
+when t4 could be mapped to NTP time through the session's clock offset."""
+PRECONF_MARGIN_RAW_MS = 800.0
+"""Same, when no clock offset is available: the laptop clock alone has drifted
+0.48 s from NTP (docs/measurements.md, 2026-10-15), plus the 300 ms above."""
+PRECONF_GATE = 0.9
+PRECONF_MIN_KNOWN = 10
+
+
+def add_rpc_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Provider per row, and whether its `t4` was a pre-confirmation.
+
+    `provider` comes from `rpcHost` (host only); a missing host is a pre-exp/rpc
+    row and therefore publicnode. `t4_preconf` combines two independent checks:
+
+    * **head** (no clock): the first `eth_blockNumber` after the receipt
+      (`headAtReceipt`) is below the receipt's `blockNumber` — the node handed
+      out a receipt for a block it did not yet have as its head.
+    * **timestamp** (clock-corrected): `t4_lead_ms` = block timestamp − t4,
+      with t4 moved from the laptop clock to NTP time by subtracting the
+      session's median `clock_offset_ms` (gateway − device; the Pi runs chrony,
+      so device time ≈ NTP ≈ sequencer time). Decides only beyond ±300 ms
+      (±800 ms with no offset): Base pre-confirmations lead by 0.8–1.5 s,
+      sealed blocks are seen 0.2–0.7 s after the timestamp.
+
+    Agreeing checks, or one decisive check alone, set the flag; disagreeing
+    checks (e.g. a load-balanced pool whose `eth_blockNumber` lags) leave it NA.
+    Old rows have neither input and stay NA — unknown, not False.
+    """
+    df = df.copy()
+    for col in ("rpcHost", "blockTimestamp", "headAtReceipt"):
+        if col not in df:
+            df[col] = np.nan
+    df["provider"] = df["rpcHost"].map(provider_of)
+    df["rpc_instrumented"] = df["rpcHost"].notna()
+
+    ok = df["status"] == "ok"
+    offset_s = df[ok].groupby("session")["clock_offset_ms"].median() / 1000
+    df["session_offset_s"] = df["session"].map(offset_s)
+    adjusted = df["session_offset_s"].notna()
+    t4_ntp = df["t4"] - df["session_offset_s"].fillna(0.0)
+    df["t4_lead_ms"] = (df["blockTimestamp"] - t4_ntp) * 1000
+    margin = pd.Series(np.where(adjusted, PRECONF_MARGIN_MS, PRECONF_MARGIN_RAW_MS), index=df.index)
+
+    lead = df["t4_lead_ms"]
+    by_ts = pd.Series(pd.NA, index=df.index, dtype="boolean")
+    by_ts[lead > margin] = True
+    by_ts[lead < -margin] = False
+    by_head = pd.Series(pd.NA, index=df.index, dtype="boolean")
+    known_head = df["headAtReceipt"].notna() & df["blockNumber"].notna()
+    by_head[known_head] = df.loc[known_head, "headAtReceipt"] < df.loc[known_head, "blockNumber"]
+
+    flag = by_head.copy()
+    flag[by_head.isna()] = by_ts[by_head.isna()]
+    conflict = (by_head.notna() & by_ts.notna() & (by_head != by_ts)).fillna(False).astype(bool)
+    flag[conflict] = pd.NA
+    flag[~ok] = pd.NA
+    df["t4_preconf"] = flag
+    return df
+
+
+def baseline_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Rows for the main tables: the baseline provider, where a condition has it.
+
+    A condition measured on another provider only (e.g. a local anvil smoke
+    run) keeps its rows, so the main tables still describe it.
+    """
+    has_base = df.groupby(KEYS)["provider"].transform(lambda s: (s == BASELINE_PROVIDER).any())
+    return df[~has_base.astype(bool) | (df["provider"] == BASELINE_PROVIDER)]
+
+
+def rpc_groups(df: pd.DataFrame) -> list[tuple[tuple, dict[str, pd.DataFrame]]]:
+    """Per condition with more than one provider: ok rows of each provider.
+
+    For the baseline, rows that recorded `rpcHost` (same instrumentation, the
+    per-row flag available — typically a same-day control session) are used
+    when the condition has any; otherwise the legacy publicnode rows.
+    """
+    ok = df[df["status"] == "ok"]
+    out = []
+    for key, g in ok.groupby(KEYS):
+        providers = sorted(set(g["provider"]))
+        if len(providers) < 2:
+            continue
+        by: dict[str, pd.DataFrame] = {}
+        for prov in providers:
+            rows = g[g["provider"] == prov]
+            if prov == BASELINE_PROVIDER and rows["rpc_instrumented"].any():
+                rows = rows[rows["rpc_instrumented"]]
+            by[prov] = rows
+        out.append((key, by))
+    return out
+
+
+def _preconf_share(rows: pd.DataFrame) -> tuple[int, float]:
+    known = rows["t4_preconf"].dropna()
+    return len(known), (float(known.astype(bool).mean()) if len(known) else math.nan)
+
+
+def t4_definition(a: pd.DataFrame, b: pd.DataFrame) -> str:
+    """'preconf' / 'sealed' when both groups demonstrably use that receipt
+    kind, else 'mixed' or 'unknown' — and then t4 latency is not compared."""
+    (ka, sa), (kb, sb) = _preconf_share(a), _preconf_share(b)
+    if ka < PRECONF_MIN_KNOWN or kb < PRECONF_MIN_KNOWN:
+        return "unknown"
+    if sa >= PRECONF_GATE and sb >= PRECONF_GATE:
+        return "preconf"
+    if sa <= 1 - PRECONF_GATE and sb <= 1 - PRECONF_GATE:
+        return "sealed"
+    return "mixed"
+
+
+def rpc_summarise(groups) -> pd.DataFrame:
+    rows = []
+    for key, by in groups:
+        for prov, g in by.items():
+            known, share = _preconf_share(g)
+            for metric in RPC_METRICS:
+                rows.append(
+                    {
+                        **dict(zip(KEYS, key)),
+                        "provider": prov,
+                        "hosts": ";".join(sorted(g["rpcHost"].dropna().astype(str).unique())) or "(legacy)",
+                        "metric": metric,
+                        **describe(g[metric]),
+                        "preconf_known": known,
+                        "preconf_share": share,
+                        "sessions": g["session"].nunique(),
+                        "commits": ";".join(sorted(g["commit"].astype(str).str[:7].unique())),
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def rpc_welch(groups) -> pd.DataFrame:
+    rows: list[dict] = []
+    for (chain, transport, config), by in groups:
+        if BASELINE_PROVIDER not in by:
+            continue
+        a = by[BASELINE_PROVIDER]
+        for prov in sorted(set(by) - {BASELINE_PROVIDER}):
+            b = by[prov]
+            definition = t4_definition(a, b)
+            metrics = RPC_TEST_METRICS + (RPC_T4_METRICS if definition in ("preconf", "sealed") else [])
+            for r in _welch_rows(a, b, BASELINE_PROVIDER, prov, f"{chain}/{transport}", config, metrics):
+                rows.append({**r, "t4_definition": definition})
+    return pd.DataFrame(rows)
+
+
+def print_rpc(rsum: pd.DataFrame, rtests: pd.DataFrame) -> None:
+    print("\n== RPC provider comparison (exp/rpc)")
+    for (chain, transport, config, prov), g in rsum.groupby(KEYS + ["provider"], sort=False):
+        first = g.iloc[0]
+        share = "n/a" if math.isnan(first.preconf_share) else f"{first.preconf_share:.0%}"
+        print(f"  {chain}/{transport}/{config}  {prov:<12} n={int(first.n)}  hosts {first.hosts}  "
+              f"t4 pre-confirmed {share} of {first.preconf_known} known")
+        for _, r in g.iterrows():
+            print(f"      {r.metric:<14}{r['mean']:>10.1f} ± {r.ci95:>7.1f}   median {r['median']:>9.1f}")
+    for _, r in rtests.iterrows():
+        print(f"  {r.scope:<20}{r.config:<11}{r.metric:<13} {r.b} - {r.a}: {r.diff_b_minus_a:+10.1f}"
+              f"   t={r.t:+7.2f}  p={r.p:.2g}   (t4: {r.t4_definition})")
+    if not rtests.empty and not rtests["metric"].isin(RPC_T4_METRICS).any():
+        print("  t4 latency not compared: the providers' receipt definitions are not shown to match")
+
+
+# --- end exp/rpc ---------------------------------------------------------------
 
 
 # --- statistics ------------------------------------------------------------
@@ -258,6 +460,122 @@ def print_summary(summary: pd.DataFrame, tests: pd.DataFrame) -> None:
                 f"  {r.scope:<13}{r.config:<11}{r.metric:<13} {r.b} - {r.a}: "
                 f"{r.diff_b_minus_a:+10.1f}   t={r.t:+7.2f}  p={r.p:.2g}"
             )
+
+
+# --- finality (experiments/finality.py) ------------------------------------
+# Separate from the M5 metrics on purpose: these rows are appended after the
+# existing summary/tests rows and never change them. A fin_*.csv row is joined
+# to the m5_ row it observed on (chainId, contract, channel, nonce, txHash).
+# Its t_safe / t_finalized are laptop time.time(), the clock of t4, so
+#   safe_ms      = t_safe - t4        (gateway clock only)
+#   finalized_ms = t_finalized - t4   (gateway clock only)
+#   finality_ms  = latency_ms + finalized_ms   (sensor event -> final; one device
+#                  span + one gateway span, no cross-machine instant, as sealed_ms)
+# Resolution: each first observation is late by up to one poll interval (the
+# fin_ row's pollInterval_s); see finality.py.
+
+FIN_METRICS = ["safe_ms", "finalized_ms", "finality_ms"]
+FIN_KEY = ["chainId", "contract", "channel", "nonce", "txHash"]
+
+
+def _fin_key(frame: pd.DataFrame) -> pd.Series:
+    nonce = pd.to_numeric(frame["nonce"], errors="coerce").astype("Int64").astype(str)
+    return (
+        frame["chainId"].astype(str) + "|" + frame["contract"].astype(str).str.lower() + "|"
+        + frame["channel"].astype(str).str.lower() + "|" + nonce + "|"
+        + frame["txHash"].astype(str).str.lower()
+    )
+
+
+def attach_finality(df: pd.DataFrame, results_dir: Path) -> pd.DataFrame:
+    """One copy of the observed rows per finality observer, with FIN_METRICS.
+
+    Several observers can watch the same transactions (e.g. the gateway's
+    provider and publicnode side by side). They are kept apart, keyed by the
+    observer's RPC host in `observerHost`, never merged: how much the provider
+    shifts the reading is itself a result. Rows no observer saw are dropped.
+    """
+    files = sorted(glob.glob(str(results_dir / "fin_*.csv")))
+    if not files:
+        return df.iloc[0:0].assign(**{m: np.nan for m in FIN_METRICS}, observerHost=None)
+    fin_all = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+    fin_all = fin_all[fin_all["status"] != "reorged"]
+    out = []
+    for host, fin in fin_all.groupby("rpcHost"):
+        out.append(_attach_one_observer(df, fin.copy()).assign(observerHost=host))
+    return pd.concat(out, ignore_index=True)
+
+
+def _attach_one_observer(df: pd.DataFrame, fin: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    # One observer process per session; a tx seen twice by the same host keeps
+    # the row that saw it finalized.
+    fin["_rank"] = (fin["status"] != "finalized").astype(int)
+    fin["_key"] = _fin_key(fin)
+    fin = fin.sort_values(["_rank", "t_finalized"]).drop_duplicates("_key")
+    # A finalized time only counts on a finalized row (not timeout/interrupted).
+    t_fin = fin["t_finalized"].where(fin["status"] == "finalized")
+    by_key_safe = dict(zip(fin["_key"], fin["t_safe"]))
+    by_key_fin = dict(zip(fin["_key"], t_fin))
+    key = _fin_key(df)
+    df["safe_ms"] = (key.map(by_key_safe).astype(float) - df["t4"]) * 1000
+    df["finalized_ms"] = (key.map(by_key_fin).astype(float) - df["t4"]) * 1000
+    df["finality_ms"] = df["latency_ms"] + df["finalized_ms"]
+    return df[df["safe_ms"].notna() | df["finalized_ms"].notna()]
+
+
+FIN_KEYS = KEYS + ["observerHost"]
+
+
+def summarise_finality(df: pd.DataFrame) -> pd.DataFrame:
+    """Same long-form rows as summarise(), for FIN_METRICS; none without fin_ data."""
+    rows = []
+    for key, g in df.groupby(FIN_KEYS):
+        ok = g[g["status"] == "ok"]
+        counts = g["status"].value_counts().to_dict()
+        for metric in FIN_METRICS:
+            if ok[metric].isna().all():
+                continue  # condition not observed by finality.py
+            rows.append(
+                {
+                    **dict(zip(FIN_KEYS, key)),
+                    "metric": metric,
+                    **describe(ok[metric]),
+                    "attempted": len(g),
+                    "failed": len(g) - counts.get("ok", 0),
+                    "sessions": g["session"].nunique(),
+                    "commits": ";".join(sorted(g["commit"].astype(str).str[:7].unique())),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def welch_finality(df: pd.DataFrame) -> pd.DataFrame:
+    """L2 vs L1 within (transport, config), per pair of observers that saw both
+    chains' runs finalized; `a`/`b` name chain@observer host."""
+    ok = df[df["status"] == "ok"]
+    rows: list[dict] = []
+    for (transport, config), g in ok.groupby(["transport", "config"]):
+        l2 = g[(g["chain"] == "base-sepolia") & g["finalized_ms"].notna()]
+        l1 = g[(g["chain"] == "sepolia") & g["finalized_ms"].notna()]
+        for ha, a in l2.groupby("observerHost"):
+            for hb, b in l1.groupby("observerHost"):
+                if len(a) > 1 and len(b) > 1:
+                    rows += _welch_rows(a, b, f"base-sepolia@{ha}", f"sepolia@{hb}",
+                                        transport, config, FIN_METRICS)
+    return pd.DataFrame(rows)
+
+
+def print_finality(fin: pd.DataFrame) -> None:
+    if fin.empty:
+        return
+    print("\n== Time to finality (ms; t_safe/t_finalized first seen, late by <= one poll)")
+    for _, r in fin.iterrows():
+        print(
+            f"  {r.chain:<13}{r.transport:<6}{r.config:<11}{str(r.observerHost):<34}{r.metric:<13} n={int(r.n):<3}"
+            f"{r['mean']:>11.0f} ± {r.ci95:>7.0f}  median {r['median']:>9.0f}"
+            f"  [{r['min']:.0f}, {r['max']:.0f}]"
+        )
 
 
 # --- figures ---------------------------------------------------------------
@@ -455,6 +773,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     df = load(args.results)
+    df_all, df = df, baseline_rows(df)  # exp/rpc: main tables = baseline provider
     summary = summarise(df)
     tests = welch(df)
     print_summary(summary, tests)
@@ -462,6 +781,28 @@ def main(argv: list[str] | None = None) -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     summary.to_csv(args.out / "summary.csv", index=False, float_format="%.4f")
     tests.to_csv(args.out / "tests.csv", index=False, float_format="%.6g")
+
+    # Sessions after results-v1 (`v2_` prefix) feed only the outputs below.
+    v2 = load(args.results, "v2", required=False)
+    if v2 is not None:
+        df_all = pd.concat([df_all, v2], ignore_index=True)
+
+    # finality (experiments/finality.py): per observer, separate files
+    fin_rows = attach_finality(df_all, args.results)
+    fin_summary, fin_tests = summarise_finality(fin_rows), welch_finality(fin_rows)
+    print_finality(fin_summary)
+    if not fin_summary.empty:
+        fin_summary.to_csv(args.out / "finality_summary.csv", index=False, float_format="%.4f")
+    if not fin_tests.empty:
+        fin_tests.to_csv(args.out / "finality_tests.csv", index=False, float_format="%.6g")
+
+    # exp/rpc: separate outputs, only when a second provider is in the data.
+    groups = rpc_groups(df_all)
+    if groups:
+        rsum, rtests = rpc_summarise(groups), rpc_welch(groups)
+        print_rpc(rsum, rtests)
+        rsum.to_csv(args.out / "rpc_summary.csv", index=False, float_format="%.4f")
+        rtests.to_csv(args.out / "rpc_tests.csv", index=False, float_format="%.6g")
 
     if not args.no_figures:
         style()

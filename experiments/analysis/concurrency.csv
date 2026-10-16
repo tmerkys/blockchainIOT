@@ -1,0 +1,6 @@
+chain,transport,deviceHost,pipeline,level,session,rpcHost,attempted,ok,failed,statuses,span_s,settled_per_s,blocks_with_settle,block_span,settles_per_block,max_settles_in_one_block,mean_settles_per_nonempty_block,latency_ms_mean,latency_ms_ci95,latency_n,sealed_ms_mean,sealed_ms_ci95,gap_affected_ok,nonce_resyncs,max_inflight,commits
+base-sepolia,wifi,pi,True,1,20261015T195753Z-6a2f7a,base-sepolia.g.alchemy.com,30,30,0,ok=30,59.3910,0.5051,30,30.0000,1.0000,1,1.0000,677.2665,43.0858,30,1966.9026,67.5023,0,0,1,c60e32f
+base-sepolia,wifi,pi,True,2,20261015T195915Z-86a5db,base-sepolia.g.alchemy.com,30,30,0,ok=30,29.3621,1.0217,15,15.0000,2.0000,2,2.0000,671.8726,42.6739,30,1988.2099,75.6529,0,0,2,c60e32f
+base-sepolia,wifi,pi,True,4,20261015T200009Z-49b2ee,base-sepolia.g.alchemy.com,40,40,0,ok=40,19.1872,2.0847,10,10.0000,4.0000,4,4.0000,732.1341,53.9848,40,1983.4137,48.8655,0,0,4,c60e32f
+base-sepolia,wifi,pi,True,8,20261015T200058Z-20730b,base-sepolia.g.alchemy.com,80,51,29,nonce_too_low=1;ok=51;receipt_error=1;refused=4;rpc_error=23,13.2021,3.8630,7,7.0000,7.2857,8,7.2857,872.7938,71.7143,51,2024.1223,78.9348,0,2,8,c60e32f
+base-sepolia,wifi,pi,True,8,20261016T083643Z-630a7c,base-sepolia-rpc.publicnode.com,64,64,0,ok=64,15.5682,4.1110,8,8.0000,8.0000,8,8.0000,940.9888,76.5787,64,1995.4161,63.5469,0,0,8,548892d

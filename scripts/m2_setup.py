@@ -46,6 +46,7 @@ from web3.exceptions import Web3RPCError  # noqa: E402
 from web3.logs import DISCARD  # noqa: E402
 
 from scripts.e2e_m1 import ARTIFACT, ENV_FILE, load_env, require  # noqa: E402
+from shared.rpc import rpc_host  # noqa: E402
 
 DEPLOY_TIMEOUT_S = 120
 NONCE_RETRIES = 3
@@ -216,7 +217,7 @@ def main(argv: list[str] | None = None) -> int:
 
     w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 10}))
     if not w3.is_connected():
-        raise SystemExit(f"no RPC at {rpc_url} — is anvil running?")
+        raise SystemExit(f"no RPC at {rpc_host(rpc_url)} — is anvil running?")
     observed = w3.eth.chain_id
     if observed != chain_id:
         raise SystemExit(f"chain id mismatch: .env says {chain_id}, the node says {observed}")
@@ -231,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  note: {device} holds ETH. Harmless, but the Pi never needs any.")
 
     print("=== 1. preflight =================================================")
-    print(f"  RPC {rpc_url}  chainId {observed}  block {w3.eth.block_number}")
+    print(f"  RPC {rpc_host(rpc_url)}  chainId {observed}  block {w3.eth.block_number}")
     print(f"  device (Pi)  {device}   <- signs, never pays")
     print(f"  funder       {funder.address}   <- escrows the deposit")
     print(f"  gateway      {gateway.address}   <- pays gas")

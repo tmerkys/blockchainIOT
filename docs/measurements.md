@@ -911,3 +911,181 @@ a pipelining gateway.
 
 ### Budget after
 Gateway holds **63,712,081,784,370 wei** (~0.000064 ETH) on Base Sepolia.
+
+## RPC benchmark — publicnode vs dedicated (Alchemy), read-only (2026-10-15)
+- Code: commit **0499e26** (`experiments/rpc_bench.py`). Data: `experiments/analysis/rpc_bench_base-sepolia_20261015T161129Z.csv`
+  (every call) and `.json` (medians). Host only is recorded; the dedicated URL is read by name
+  (`BASE_SEPOLIA_DEDICATED_RPC_URL`, gitignored `.env`) and never written anywhere.
+- Method as in M3 cleanup §2: the relayer's four pre-broadcast calls in its order, one kept-alive
+  session per endpoint, 3 warm-up repetitions, then N = 50 repetitions, endpoints interleaved, 0.5 s
+  pause. `eth_estimateGas` is of a read-only `channels()` call on the M5 contract (the real
+  `settle()` estimate needs three valid signatures). Laptop, home link, Base Sepolia.
+
+| call (median ms, p10–p90) | publicnode | Alchemy |
+|---|---|---|
+| `eth_getTransactionCount` | 71.8 (66.7–85.2) | 51.7 (47.9–57.4) |
+| `eth_estimateGas` | 207.5 (201.5–220.8) | 156.6 (150.0–177.5) |
+| `eth_getBlockByNumber(latest)` | 77.0 (70.4–83.6) | 52.2 (48.3–58.7) |
+| `eth_maxPriorityFeePerGas` | 69.0 (65.6–74.3) | 51.4 (47.2–56.0) |
+| **sum of the four** | **429.2 (414.3–451.0)** | **314.1 (301.2–359.3)** |
+
+0 failures on either. Read-only Flashblocks hint: `pending` was one block ahead of `latest` in
+10/10 probes on **both** endpoints, which suggests both serve pre-confirmed state. Whether Alchemy
+returns pre-confirmed *receipts* is decided only by a live session (per-row `t4_preconf`).
+Not a latency result: no transaction was sent; `eth_sendRawTransaction` and the receipt wait are not
+in these numbers. publicnode's sum is higher than the 328 ms in M3 cleanup (different estimate
+target, different day).
+
+## Session v2-1 — dedicated RPC (Alchemy) vs same-day publicnode control, with finality observers (2026-10-15)
+- Commit **985c64e** both machines (merged exp/finality + exp/rpc + exp/concurrency, v2 prefix, `--rpc-var`).
+  Base Sepolia, contract `0xb746…4bF9`, channel `0x69af…20D2`; WiFi; controlled (governor performance,
+  powersave disable, per row). Laptop `w32tm /resync` done; residual laptop offset −0.18 s vs
+  time.cloudflare.com (per-session clock-offset diagnostic +183 ms); Pi chrony 0.4 ms. Diagnostic only.
+- **Prefix `v2_`** (not `m5_`): these sessions never enter summary.csv/tests.csv, which stay byte-identical
+  to results-v1 (checked). They feed `rpc_summary.csv`/`rpc_tests.csv` and `finality_summary.csv`.
+- Arm 1, control: gateway on publicnode, `v2_base-sepolia_wifi_20261015T163804Z-fe45bc.csv`, nonces 189–218, **30/30 ok**.
+- Arm 2, dedicated: gateway on Alchemy (`--rpc-url-var BASE_SEPOLIA_DEDICATED_RPC_URL`, host
+  `base-sepolia.g.alchemy.com`, URL never logged — checked logs and /health), `v2_base-sepolia_wifi_20261015T164108Z-63645f.csv`,
+  nonces 219–248, **30/30 ok**. Arms run back to back, never overlapping.
+- Finality observers (`experiments/finality.py`, poll 2 s = resolution): two per arm, Alchemy and
+  publicnode, on the same transactions. 4 × 30 rows, **all `finalized`**, 0 timeouts, 0 reorgs.
+  `fin_base-sepolia_wifi_20261015T163813Z-{f8c1d1 (alchemy), c9c882 (publicnode)}.csv`,
+  `fin_base-sepolia_wifi_20261015T164117Z-{a5b443 (alchemy), 69b217 (publicnode)}.csv`.
+
+### Provider comparison (mean ± 95% CI, n = 30 each, ms; Welch)
+| | publicnode (control) | Alchemy | Alchemy − publicnode |
+|---|---|---|---|
+| receipt definition (`t4_preconf`) | pre-confirmed 30/30 | pre-confirmed 30/30 | like for like |
+| **latency `t4 − t0`** | 901.0 ± 51.0 | **782.4 ± 46.1** | **−118.6, p = 8.3e-04** |
+| build + broadcast `t3 − t2` | 674.1 ± 25.2 | **542.1 ± 27.8** | **−132.0, p = 1.5e-09** |
+| to sealed block | 2138.3 ± 204.4 | 2190.3 ± 209.4 | +52.0, p = 0.72 |
+
+Alchemy also returns Flashblocks pre-confirmed receipts, so latency compares like for like. The
+dedicated endpoint removes ~130 ms of gateway↔RPC time, matching the read-only benchmark (four
+pre-broadcast calls, −115 ms, exp/rpc entry). Time to a sealed block does not move: it is set by
+Base's 2 s block period. Thesis claim §4.2.3 ("the public RPC is the L2 bottleneck") is supported
+for pre-confirmation latency; for sealed-block latency the block period dominates.
+
+### Time to finality, Base Sepolia (ms after `t4`; n = 60 = both arms; per observer)
+| observer | `safe` | `finalized` | median finalized | range |
+|---|---|---|---|---|
+| publicnode | 121,945 ± 7,672 | **1,048,889 ± 28,373** | 1,066,670 | 838,032 – 1,209,582 |
+| Alchemy | 76,275 ± 7,650 | 1,309,808 ± 29,060 | 1,311,835 | 1,113,314 – 1,487,064 |
+
+- **Base finality ≈ 17.5 min** after the pre-confirmation (publicnode's earliest report), safe ≈ 1.3–2 min.
+- **The provider shifts the reading by ~4.4 min** (finalized) — opposite directions for `safe` (Alchemy
+  ~46 s earlier) and `finalized` (Alchemy ~261 s later). A node can only *lag* the chain's true finality,
+  never lead it, so the earlier report is the closer upper bound: **true time to finality ≤ ~17.5 min
+  (mean)**, and the single-provider gateway would believe it ~4 min late on Alchemy.
+- publicnode's `finalized` flipped between two backends on every few polls (4,439 + 3,653 regressions
+  counted); the observer records the first report reaching the tx's block, so the leading backend sets
+  its number. Alchemy: 0 regressions. Consistent with the read-only lag samples in the exp/finality
+  entry (publicnode leading backend 854–1,110 s; Alchemy ~1,334–1,406 s behind latest) — no contradiction.
+
+### Budget after
+Base Sepolia gateway **35,885,856,870,265 wei** (60 settles: 2.78e13 wei, within the 2.79e13 estimate).
+
+## Session v2-2 — L1 time to finality: Ethereum Sepolia, WiFi, controlled, N=30 (2026-10-15)
+- Commit **615d34d** both machines. Gateway `--env-file .env.sepolia` (host ethereum-sepolia-rpc.publicnode.com),
+  contract `0xd0D2…7766`, channel `0x8800…4685`, nonces 63–92, gap 12–24 s. Controlled per row. Laptop −0.13 s vs
+  time.cloudflare.com before the start (clock-offset diagnostic +120.7 ms); Pi chrony 0.06 ms. Started
+  automatically under the user's pre-approval ("if all checks pass, clock within 0.5 s"); all checks passed.
+- Data: `v2_sepolia_wifi_20261015T170546Z-064c00.csv` — **30/30 ok**; observer (`--rpc-env .env.sepolia`, poll 2 s)
+  `fin_sepolia_wifi_20261015T170601Z-487aca.csv` — **30/30 finalized**, 0 tag regressions, 0 RPC errors.
+
+### Latency vs the results-v1 L1 WiFi session (same condition, prefix v2, not pooled)
+Latency 7537.0 ms mean (sd 3482.6) vs 8736.4 ± 1354.8: Welch p = 0.20 — no contradiction (L1 latency is
+dominated by the slot position). Inclusion 6951 vs 8009 ms, p = 0.25. **Build + broadcast 542 vs 682 ms,
+p = 2.5e-11** on the same publicnode endpoint: the public RPC answered ~140 ms faster today. Not a change in
+any conclusion (build was and is ~7% of L1 latency) but a day-to-day RPC effect, noted as such.
+
+### Time to finality (ms after `t4`, mean ± 95% CI, n; Welch vs Base per Base observer)
+| | `safe` | `finalized` | median finalized | range |
+|---|---|---|---|---|
+| **L1 Ethereum Sepolia** (publicnode, n = 30) | 589,985 ± 42,162 | **972,890 ± 42,128** | 977,119 | 791,080 – 1,150,553 |
+| L2 Base Sepolia, publicnode observer (n = 60, v2-1) | 121,945 ± 7,672 | 1,048,889 ± 28,373 | 1,066,670 | 838,032 – 1,209,582 |
+| L2 Base Sepolia, Alchemy observer (n = 60, v2-1) | 76,275 ± 7,650 | 1,309,808 ± 29,060 | 1,311,835 | 1,113,314 – 1,487,064 |
+
+- **L1 finalizes in ~16.2 min** (two epochs ≈ 12.8 min plus slot position and the epoch boundary; `safe` ~9.8 min).
+- **L2 Base finalizes *later* than L1**: +76.0 s vs the publicnode observer (p = 3.6e-03), +336.9 s vs Alchemy
+  (p = 2.3e-19). Expected from the rollup design — a Base block is final only once its batch is posted to L1
+  and that L1 block finalizes — but it is the reverse of the latency ranking: **L2 is ~1 s to pre-confirmation
+  and ~2.3 s to a sealed block, yet ~1–5 min slower than L1 to finality.** `safe` is the other way round:
+  Base 1.3–2 min, L1 ~9.8 min (p ≈ 1e-20).
+- Sensor event → finality (`finality_ms`): L1 980,427 ± 42,204 ms; Base 1,049,731 ± 28,371 (publicnode).
+- Different days are not involved: both chains measured 2026-10-15, ~25 min apart.
+
+### Budget after
+Ethereum Sepolia gateway **49,966,419,633,186,568 wei** (30 settles: 2.65e12 wei, as estimated).
+
+## Session v2-3 — concurrent load, K = 1, 2, 4, 8 devices, pipelining gateway (Base Sepolia, 2026-10-15)
+- Commit **c60e32f** both machines. Device side: K processes **on the Pi** (real hardware, sharing its 4 cores
+  and the WiFi link), each with its own key (generated on the Pi by `device/keygen_load.py`, passphrase
+  generated on the Pi with `--allow-env-password`, user-approved; private keys never left the Pi) and its own
+  channel. Gateway: `experiments/concurrency.py serve` with the **separate load key**
+  `0x9039bA244196b4102DBb87583Fb499afC33Db78f`, `GATEWAY_PIPELINE=1`, RPC **Alchemy** (`base-sepolia.g.alchemy.com`).
+  Every channel is 3-of-3: device_i, the load gateway, the existing merchant `0xc154…9C04`. WiFi, controlled,
+  no gap between a device's runs.
+- Funding: 0.0005 Sepolia ETH bridged from the L1 gateway to the load key via Base Sepolia's L1StandardBridge
+  `0xfd0B…3120` (verified on-chain from both sides), tx `0x73504da1…89319`, arrived after ~6 min.
+- Setup (not measured): 8 × `open()` at 149,967 gas, deposits sized for plan A ×1.5; 1.52e13 wei.
+- Data: `cc_base-sepolia_k{1,2,4,8}_20261015T19575…/20061…Z-*.csv` (prefix `cc_`, never pooled), analysis
+  `experiments/analysis/concurrency.csv`.
+
+### Results (latency/sealed: mean ± 95% CI over gap-free ok rows, ms)
+| K | ok / attempted | settled/s | settles per block (max) | latency `t4 − t0` | to sealed block |
+|---|---|---|---|---|---|
+| 1 | 30 / 30 | 0.51 | 1.00 (1) | 677.3 ± 43.1 (30) | 1966.9 ± 67.5 |
+| 2 | 30 / 30 | 1.02 | 2.00 (2) | 671.9 ± 42.7 (30) | 1988.2 ± 75.7 |
+| 4 | 40 / 40 | 2.08 | 4.00 (4) | 732.1 ± 54.0 (40) | 1983.4 ± 48.9 |
+| 8 | **51 / 80** | 3.86 | 7.29 (8) | 872.8 ± 71.7 (51) | 2024.1 ± 78.9 |
+
+- **Throughput scales linearly with K up to 4** (exactly K settlements per 2 s block, 0 failures, 0 nonce
+  resyncs); latency per payment stays ~0.7 s and time to a sealed block ~2 s. The H2 tp_ finding (one settle
+  per block) was the sequential gateway, as stated; with pipelining the 3-of-3 contract settles K per block.
+- **K = 8: 29/80 failed, all from the RPC plan, not the chain or the contract.** 28 × HTTP 429 "Too Many
+  Requests" from Alchemy's free tier (23 `rpc_error` at estimate_gas/fee lookup before a nonce was taken,
+  4 `refused` 500s, 1 `receipt_error`), plus 1 `nonce_too_low` caused by that receipt_error. Still 3.86
+  settled/s and up to 8 in one block. URL redaction held: rows carry `<rpc base-sepolia.g.alchemy.com>` only.
+- **Gateway bug found (pipelining mode only):** the `receipt_error` row (device 4, voucher nonce 17, tx nonce
+  159, tx `0x96e030ae…7188`) **did settle on-chain** (receipt status 1, checked on publicnode); only the
+  receipt *lookup* got a 429. The nonce manager treats a receipt failure like a failed broadcast, released
+  nonce 159, re-allocated it, and the next voucher failed `nonce_too_low`. No funds or payments lost, nothing
+  hidden (both rows recorded), but that row is a success recorded as a failure: **K = 8 is 52 settled, not 51.**
+  Raw CSV left as written; fix needed before any rerun (a broadcast tx's nonce is consumed whatever happens
+  to the receipt poll).
+- Latency at K = 1 (677 ms) is below the v2-1 Alchemy session (782 ms): the pipelining path skips the
+  per-tx `get_transaction_count` call (local nonce). Same provider, different gateway code path — not a
+  contradiction.
+
+### Budget after
+Load key **407,761,798,615,875 wei** (spent 9.22e13 incl. 1.1e13 deposits; plan A estimate 1.11e14).
+
+## Session v2-4 — K = 8 rerun on publicnode after the nonce fix (Base Sepolia, 2026-10-16)
+- Commit **548892d** both machines (the `_submit_pipelined` fix: a receipt-lookup error no longer releases a
+  broadcast tx's nonce; regression test in `gateway/test_pipeline.py`). Same 8 Pi devices, keys and channels
+  as v2-3 (`LOAD_CHANNEL_1..8`, no new channels), same load key `0x9039…b78f`, `GATEWAY_PIPELINE=1`, WiFi,
+  controlled, no gap. **RPC: publicnode** (`base-sepolia-rpc.publicnode.com`), chosen because the v2-3 K = 8
+  failures were the Alchemy free-tier rate limit. n = 8 per device (64 attempts): what the remaining channel
+  deposits cover without topping up.
+- Checks before start: Pi rebooted (power), governor set back to `performance`, WiFi powersave `disable`,
+  Pi chrony 0.1 µs; laptop `w32tm /resync` (admin), stripchart vs time.cloudflare.com +1…+9 ms.
+- Data: `cc_base-sepolia_k8_20261016T083643Z-630a7c.csv`, blocks 48185772–48185779.
+- `concurrency.py analyze` now groups **per session** and reports `rpcHost`; before, the two K = 8 sessions
+  (a day apart) pooled into one meaningless throughput span. K = 1/2/4 and the v2-3 K = 8 row reproduce
+  unchanged. results-v1 `summary.csv`/`tests.csv` re-checked identical.
+
+### Results (mean ± 95% CI, n)
+| K = 8 | ok / attempted | settled/s | settles per block (max) | latency `t4 − t0` | to sealed block |
+|---|---|---|---|---|---|
+| v2-3, Alchemy free tier | 51 / 80 | 3.86 | 7.29 (8) | 872.8 ± 71.7 (51) | 2024.1 ± 78.9 |
+| **v2-4, publicnode** | **64 / 64** | **4.11** | **8.00 (8)** | 941.0 ± 76.6 (64) | 1995.4 ± 63.5 |
+
+- **0 failures, 0 nonce resyncs, exactly 8 settlements in every one of 8 consecutive blocks.** Throughput
+  keeps scaling linearly at K = 8 (K settles per 2 s block for K = 1, 2, 4, 8). The v2-3 K = 8 failures were
+  the provider's rate limit, confirmed: the same devices, channels and contract succeed 64/64 elsewhere.
+- Latency vs v2-3 K = 8: +68 ms, Welch p = 0.20; sealed −29 ms, p = 0.57. No significant difference, no
+  contradiction (v2-1 showed Alchemy ~120 ms faster at K = 1; here the difference is within noise).
+
+### Budget after
+Load key **378,086,638,595,465 wei** (spent 2.97e13 for 64 settlements).

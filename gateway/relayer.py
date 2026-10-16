@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -31,8 +32,9 @@ from eth_utils import is_address, to_checksum_address
 from hexbytes import HexBytes
 from pydantic import BaseModel
 from web3 import Web3
-from web3.exceptions import ContractLogicError
+from web3.exceptions import ContractLogicError, TimeExhausted
 
+from shared.rpc import redact, rpc_host
 from shared.voucher import Voucher
 
 log = logging.getLogger(__name__)
@@ -161,6 +163,18 @@ class RelayerConfig:
     confirmations: int = 1
     rpc_timeout: float = RPC_TIMEOUT_S
 
+    # --- exp/rpc: per-row receipt definition check -------------------------
+    record_block_timestamp: bool = True
+    """After t5, read the receipt block's timestamp (one `eth_getBlockByNumber`).
+
+    Outside the measured span: it runs after t5, and the device's reported
+    latency subtracts everything between t4 and t6. Lets the analysis tell a
+    Flashblocks pre-confirmation (receipt before the block's timestamp) from a
+    sealed-block receipt, per row (docs/measurements.md, 2026-10-15
+    correction). Env `RECORD_BLOCK_TIMESTAMP=0` turns it off.
+    """
+    # --- end exp/rpc ------------------------------------------------------
+
     submit: bool = False
     """Broadcast `settle()`, or stop once the calldata is built?
 
@@ -168,6 +182,18 @@ class RelayerConfig:
     gas on its own. `scripts/e2e_m1.py` and the experiment runner set
     `GATEWAY_SUBMIT=1`; the unit tests leave it off and stay chain-free.
     """
+
+    # --- concurrency experiment (exp/concurrency); inert unless enabled ----
+    pipeline: bool = False
+    """Pipelining mode (env `GATEWAY_PIPELINE`), off by default. When on, the
+    gateway allocates transaction nonces from a local counter so several
+    vouchers can be in flight at once, and the API runs `relay()` in a thread
+    pool. See `NonceManager` for the nonce-gap policy. When off, nothing in the
+    default path changes."""
+
+    receipt_timeout: float = RECEIPT_TIMEOUT_S
+    """Receipt wait in pipelining mode only (env `GATEWAY_RECEIPT_TIMEOUT_S`);
+    the default path keeps the module constant."""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> RelayerConfig:
@@ -228,6 +254,11 @@ class RelayerConfig:
             confirmations=integer("CONFIRMATIONS", defaults.confirmations),
             rpc_timeout=number("RPC_TIMEOUT_S", defaults.rpc_timeout),
             submit=boolean("GATEWAY_SUBMIT", defaults.submit),
+            record_block_timestamp=boolean(
+                "RECORD_BLOCK_TIMESTAMP", defaults.record_block_timestamp
+            ),
+            pipeline=boolean("GATEWAY_PIPELINE", defaults.pipeline),
+            receipt_timeout=number("GATEWAY_RECEIPT_TIMEOUT_S", defaults.receipt_timeout),
         )
 
 
@@ -284,6 +315,18 @@ class RelayResult(BaseModel):
     # Nothing is ever computed by subtracting it from a device-side mark.
     t6: float | None = None  # gateway: response handed back to the transport
 
+    # --- exp/rpc: which RPC answered, and which receipt definition it used ---
+    # Host only, never the URL: a dedicated endpoint's URL carries its API key.
+    rpcHost: str | None = None
+    # Timestamp (chain clock, integer seconds) of the block the receipt names,
+    # read after t5. A receipt held before this instant is a pre-confirmation.
+    blockTimestamp: int | None = None
+    # First `eth_blockNumber` the gateway saw after the receipt (the first t5
+    # poll). Below `blockNumber` means the receipt arrived before its block was
+    # the node's head — a pre-confirmation, decided without any clock.
+    headAtReceipt: int | None = None
+    # --- end exp/rpc ------------------------------------------------------
+
 
 class Relayer:
     """Verifies vouchers and turns them into `settle()` transactions.
@@ -309,6 +352,15 @@ class Relayer:
             if self.config.gateway_private_key
             else None
         )
+        # Pipelining mode only (exp/concurrency): created lazily on first use.
+        self._nonces: NonceManager | None = None
+        self._channel_devices: dict[str, str] = {}
+        self._pipeline_lock = threading.Lock()
+
+    @property
+    def rpc_host(self) -> str | None:
+        """Host of the configured RPC endpoint — the only part of it ever shown."""
+        return rpc_host(self.config.rpc_url)
 
     @property
     def gateway_address(self) -> str | None:
@@ -459,7 +511,9 @@ class Relayer:
         """
         target = block_number + self.config.confirmations - 1
         deadline = time.monotonic() + RECEIPT_TIMEOUT_S
-        while self.w3.eth.block_number < target:
+        while (head := self.w3.eth.block_number) < target:
+            if result.headAtReceipt is None:
+                result.headAtReceipt = head  # exp/rpc: first poll only
             if time.monotonic() > deadline:
                 log.warning(
                     "timed out waiting for %d confirmations on block %d; t5 left unset",
@@ -469,6 +523,8 @@ class Relayer:
                 return
             time.sleep(CONFIRMATION_POLL_S)
         result.t5 = time.time()
+        if result.headAtReceipt is None:
+            result.headAtReceipt = head  # exp/rpc: head was already there at t4
 
     def _submit(self, tx: dict[str, Any], result: RelayResult) -> RelayResult:
         """Broadcast `settle()`, wait for the receipt, stamp t3-t5.
@@ -542,7 +598,30 @@ class Relayer:
             result.gasUsed,
         )
         self._await_confirmations(receipt["blockNumber"], result)
+        self._record_block_timestamp(result)  # exp/rpc: after t5, outside the span
         return result
+
+    # --- exp/rpc: receipt definition check, after the measured span ---------
+
+    def _record_block_timestamp(self, result: RelayResult) -> None:
+        """Read the receipt block's timestamp into `result`, best effort.
+
+        A failure leaves it None and costs the row nothing else: the
+        settlement is already sealed and its marks are already stamped.
+        """
+        if not self.config.record_block_timestamp or result.blockNumber is None:
+            return
+        try:
+            block = self.w3.eth.get_block(result.blockNumber)
+            result.blockTimestamp = receipt_int(block["timestamp"])
+        except Exception as exc:  # noqa: BLE001 — diagnostic only
+            log.warning(
+                "could not read timestamp of block %s: %s",
+                result.blockNumber,
+                redact(str(exc), self.config.rpc_url),
+            )
+
+    # --- end exp/rpc --------------------------------------------------------
 
     # --- entry point --------------------------------------------------------
 
@@ -564,6 +643,10 @@ class Relayer:
         maps those to different status codes, because they are different
         people's problems.
         """
+        if self.config.pipeline:  # exp/concurrency; off by default
+            return self._relay_pipelined(
+                voucher, sig_device, sig_merchant, close=close, t0=t0, t1=t1, t2=t2
+            )
         self.check_deadline(voucher)
         device = self.verify_device(voucher, sig_device)
         merchant = self.verify_merchant(voucher, sig_merchant) if sig_merchant else None
@@ -592,8 +675,205 @@ class Relayer:
             t0=t0,
             t1=t1,
             t2=t2,
+            rpcHost=self.rpc_host,  # exp/rpc
         )
         return self._submit(tx, result)
+
+    # --- pipelining (exp/concurrency; GATEWAY_PIPELINE=1, off by default) ----
+    #
+    # Everything in this block runs only when `config.pipeline` is on. The
+    # default path above (`relay` -> `_submit`) is untouched: one fresh
+    # `get_transaction_count` per voucher, serialised by the event loop.
+
+    def _nonce_manager(self) -> NonceManager:
+        """The process-wide nonce counter, created on first use."""
+        with self._pipeline_lock:
+            if self._nonces is None:
+                if self._account is None:
+                    raise RelayerNotReady("GATEWAY_PRIVATE_KEY is not set; the gateway cannot submit")
+                address = self._account.address
+                self._nonces = NonceManager(
+                    lambda: self.w3.eth.get_transaction_count(address, "pending")
+                )
+            return self._nonces
+
+    def _channel_device(self, channel: str) -> str:
+        """The `device` signer the contract registered for `channel`, cached.
+
+        With K load-test devices there is no single `DEVICE_ADDRESS`. Instead
+        of accepting any recovered signer, the pipelined path binds the
+        signature to the channel's own device, read once from the contract
+        (it is immutable after `open()`), so the check stays as strict as the
+        single-device one and costs one RPC per channel, not per voucher.
+        """
+        key = to_checksum_address(channel)
+        with self._pipeline_lock:
+            cached = self._channel_devices.get(key)
+        if cached is not None:
+            return cached
+        state = self.channel_state(key)
+        if not state["exists"]:
+            raise VoucherRejected("unknown channel")
+        with self._pipeline_lock:
+            self._channel_devices[key] = state["device"]
+        return state["device"]
+
+    def _relay_pipelined(
+        self,
+        voucher: Voucher,
+        sig_device: bytes,
+        sig_merchant: bytes | None,
+        *,
+        close: bool,
+        t0: float | None,
+        t1: float | None,
+        t2: float | None,
+    ) -> PipelinedResult:
+        """`relay()` for pipelining mode: same checks, local nonce allocation."""
+        self.check_deadline(voucher)
+        if self.config.device_address is not None:
+            device = self.verify_device(voucher, sig_device)
+        else:
+            device = self.recover(voucher, sig_device)
+            if device != self._channel_device(voucher.channel):
+                raise VoucherRejected("bad device sig: signer is not the channel's device")
+        merchant = self.verify_merchant(voucher, sig_merchant) if sig_merchant else None
+        if merchant is None and self.config.submit:
+            raise VoucherRejected("missing merchant signature: settle() is 3-of-3")
+
+        sig_gateway = self.sign(voucher)
+        tx = self.build_settle_tx(
+            voucher, sig_device, sig_gateway, sig_merchant or b"", close=close
+        )
+        result = PipelinedResult(
+            accepted=True,
+            submitted=False,
+            channel=voucher.channel,
+            nonce=voucher.nonce,
+            cumulativeAmount=voucher.cumulativeAmount,
+            serviceRef=HexBytes(voucher.serviceRef).to_0x_hex(),
+            device=device,
+            gateway=self.gateway_address,
+            merchant=merchant,
+            closed=close,
+            calldata=tx["data"],
+            t0=t0,
+            t1=t1,
+            t2=t2,
+            rpcHost=self.rpc_host,  # exp/rpc
+        )
+        return self._submit_pipelined(tx, result)
+
+    def _fail(self, result: PipelinedResult, failure: str, detail: str) -> PipelinedResult:
+        result.failure = failure
+        # RPC exceptions can quote the endpoint URL, and a keyed URL carries
+        # its API key in the path (exp/rpc): host only, in rows and in logs.
+        result.reason = f"{failure}: {redact(detail, self.config.rpc_url)}"
+        log.error(
+            "pipelined relay failed: channel=%s nonce=%s %s",
+            result.channel, result.nonce, result.reason,
+        )
+        return result
+
+    def _submit_pipelined(self, tx: dict[str, Any], result: PipelinedResult) -> PipelinedResult:
+        """Broadcast with a locally allocated nonce; never retries a voucher.
+
+        Order matters for the nonce-gap problem: gas estimation and the fee
+        lookup run *before* a nonce is allocated, so a voucher that would
+        revert, or an RPC hiccup at that stage, never consumes one. Only the
+        broadcast and the receipt wait can fail while holding a nonce, and
+        each such failure goes to `NonceManager.fail()`, which resyncs and
+        counts it (see its docstring for the policy).
+        """
+        if not self.config.submit:
+            return self._submit(tx, result)  # calldata-only: identical to default
+        if self._account is None:
+            raise RelayerNotReady("GATEWAY_PRIVATE_KEY is not set; the gateway cannot submit")
+
+        tx = dict(tx)
+        tx["from"] = self._account.address
+        try:
+            # No nonce in the estimate on purpose: with others in flight the
+            # local nonce is ahead of the chain's, and the estimate runs on
+            # the latest state either way.
+            tx["gas"] = int(self.w3.eth.estimate_gas(tx) * GAS_LIMIT_MARGIN)
+        except ContractLogicError as exc:
+            raise VoucherRejected(f"settle() would revert: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001 - a row, not a 500
+            return self._fail(result, FAIL_RPC, f"estimate_gas: {exc}")
+        try:
+            tx.update(self._fee_fields())
+        except Exception as exc:  # noqa: BLE001
+            return self._fail(result, FAIL_RPC, f"fee lookup: {exc}")
+
+        try:
+            nonces = self._nonce_manager()
+        except RelayerNotReady:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the initial pending-nonce read failed
+            return self._fail(result, FAIL_RPC, f"initial nonce read: {exc}")
+
+        nonce, epoch = nonces.allocate()
+        tx["nonce"] = nonce
+        result.txNonce = nonce
+        result.nonceEpoch = epoch
+        signed = self._account.sign_transaction(tx)
+        try:
+            tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+        except Exception as exc:  # noqa: BLE001
+            failure = classify_send_error(exc)
+            nonces.fail(nonce, failure)
+            result.gapBehind = nonces.release(nonce)
+            result.nonceResyncs = nonces.resyncs
+            return self._fail(result, failure, f"broadcast of nonce {nonce}: {exc}")
+        result.t3 = time.time()
+        result.txHash = HexBytes(tx_hash).to_0x_hex()
+        result.submitted = True
+        result.inflight = nonces.broadcast()
+
+        try:
+            receipt = self.w3.eth.wait_for_transaction_receipt(
+                tx_hash, timeout=self.config.receipt_timeout
+            )
+        except Exception as exc:  # noqa: BLE001
+            failure = FAIL_NOT_MINED if isinstance(exc, TimeExhausted) else FAIL_RECEIPT
+            nonces.landed()
+            if failure == FAIL_NOT_MINED:
+                # No receipt within the timeout: the tx may have been dropped,
+                # leaving its nonce unused and everything above it stalled.
+                nonces.fail(nonce, failure)
+            # FAIL_RECEIPT: the node accepted the broadcast (it returned the
+            # hash) and only the receipt *lookup* failed — e.g. a 429 from the
+            # RPC. The nonce is consumed whether or not the tx has mined yet;
+            # resyncing here would hand it out again (v2-3, 2026-10-15: tx
+            # nonce 159 settled on-chain, its nonce was re-allocated and the
+            # next voucher failed nonce_too_low). The row's outcome is unknown
+            # at reply time, not failed; check txHash against the chain.
+            result.gapBehind = nonces.release(nonce)
+            result.nonceResyncs = nonces.resyncs
+            return self._fail(result, failure, f"tx {result.txHash} nonce {nonce}: {exc}")
+        result.t4 = time.time()
+        nonces.landed()
+        result.gapBehind = nonces.release(nonce)
+        result.nonceResyncs = nonces.resyncs
+
+        result.blockNumber = receipt_int(receipt["blockNumber"])
+        result.gasUsed = receipt_int(receipt["gasUsed"])
+        result.effectiveGasPrice = receipt_int(receipt.get("effectiveGasPrice"))
+        result.l1Fee = receipt_int(receipt.get("l1Fee"))
+        result.l1GasUsed = receipt_int(receipt.get("l1GasUsed"))
+        result.l1GasPrice = receipt_int(receipt.get("l1GasPrice"))
+
+        if receipt["status"] != 1:
+            # Same 200 + reason as the default path; `failure` names it too.
+            result.reason = "settle() reverted on-chain despite a clean gas estimate"
+            result.failure = FAIL_REVERTED
+            log.error("settle() reverted: tx=%s block=%s", result.txHash, result.blockNumber)
+            return result
+
+        self._await_confirmations(receipt["blockNumber"], result)
+        self._record_block_timestamp(result)  # exp/rpc: after t5, outside the span
+        return result
 
     # --- channel state ------------------------------------------------------
 
@@ -623,7 +903,9 @@ class Relayer:
                 closed,
             ) = self._contract.functions.channels(address).call()
         except Exception as exc:
-            raise RelayerNotReady(f"could not read channel {address}: {exc}") from exc
+            raise RelayerNotReady(
+                f"could not read channel {address}: {redact(str(exc), self.config.rpc_url)}"
+            ) from exc
 
         return {
             "channel": address,
@@ -664,10 +946,11 @@ class Relayer:
                 self.w3.eth.get_code(to_checksum_address(self.config.payment_channel))
             )
         except Exception as exc:
-            rpc_error = str(exc)
+            rpc_error = redact(str(exc), self.config.rpc_url)
 
         return {
-            "rpcUrl": self.config.rpc_url,
+            # Host only (exp/rpc): a dedicated endpoint's URL is a credential.
+            "rpcHost": self.rpc_host,
             "rpcReachable": observed is not None,
             "rpcError": rpc_error,
             "chainId": self.config.chain_id,
@@ -683,4 +966,202 @@ class Relayer:
             "merchant": self.config.merchant_address,
             "confirmations": self.config.confirmations,
             "canSign": self._account is not None,
+            # Only present in pipelining mode, so the default /health is unchanged.
+            **(
+                {
+                    "pipeline": True,
+                    "nonceManager": self._nonces.snapshot() if self._nonces else None,
+                }
+                if self.config.pipeline
+                else {}
+            ),
         }
+
+
+# =============================================================================
+# Pipelining mode (exp/concurrency). Inert unless GATEWAY_PIPELINE=1.
+# =============================================================================
+
+# Row statuses for failures that only exist once several transactions share
+# one sender. Each is a distinct value in the `failure` field, never folded
+# into a generic error, and no voucher is ever retried behind the device's back.
+FAIL_NONCE_TOO_LOW = "nonce_too_low"  # node: nonce already used (or our counter is behind)
+FAIL_REPLACEMENT_UNDERPRICED = "replacement_underpriced"  # same nonce already pending
+FAIL_ALREADY_KNOWN = "already_known"  # identical tx already in the pool
+FAIL_NONCE_TOO_HIGH = "nonce_too_high"  # node refuses a gapped nonce
+FAIL_INSUFFICIENT_FUNDS = "insufficient_funds"
+FAIL_UNDERPRICED = "underpriced"  # fee cap below base fee / pool minimum
+FAIL_SEND_TIMEOUT = "send_timeout"  # broadcast timed out: ambiguous, may have landed
+FAIL_SEND = "send_error"  # any other broadcast error
+FAIL_NOT_MINED = "not_mined"  # broadcast ok, no receipt within the timeout (dropped/stuck)
+FAIL_RECEIPT = "receipt_error"  # RPC error while waiting for the receipt
+FAIL_RPC = "rpc_error"  # estimate/fee/nonce read failed before a nonce was held
+FAIL_REVERTED = "reverted"  # mined, status 0 (also has the default path's reason)
+
+NONCE_OCCUPIED = frozenset({FAIL_NONCE_TOO_LOW, FAIL_REPLACEMENT_UNDERPRICED, FAIL_ALREADY_KNOWN})
+"""Broadcast failures that prove the nonce is already used: no gap is left."""
+
+
+def classify_send_error(exc: BaseException) -> str:
+    """Map a `send_raw_transaction` error onto one of the FAIL_* statuses.
+
+    Matches on the node's message text, which is the only thing geth, reth,
+    anvil and op-geth agree on (codes differ). Unknown messages fall through
+    to `send_error`, with the full text kept in `reason`.
+    """
+    msg = str(exc).lower()
+    if "nonce too low" in msg or "nonce is too low" in msg or "old nonce" in msg:
+        return FAIL_NONCE_TOO_LOW
+    if "replacement" in msg and ("underpriced" in msg or "fee too low" in msg):
+        return FAIL_REPLACEMENT_UNDERPRICED
+    if "already known" in msg or "already imported" in msg or "known transaction" in msg:
+        return FAIL_ALREADY_KNOWN
+    if "nonce too high" in msg or "nonce gap" in msg:
+        return FAIL_NONCE_TOO_HIGH
+    if "insufficient funds" in msg:
+        return FAIL_INSUFFICIENT_FUNDS
+    if "underpriced" in msg or "fee cap" in msg or "less than block base fee" in msg:
+        return FAIL_UNDERPRICED
+    if "timed out" in msg or "timeout" in msg or type(exc).__name__ in ("ReadTimeout", "Timeout"):
+        return FAIL_SEND_TIMEOUT
+    return FAIL_SEND
+
+
+class NonceManager:
+    """Thread-safe local nonce counter for one sending key.
+
+    Initialised from `get_transaction_count(addr, "pending")` and incremented
+    per allocation, so N vouchers can be in flight without each waiting for
+    the previous receipt.
+
+    **The nonce-gap problem, and the policy.** If the transaction holding
+    nonce n fails to broadcast (or is broadcast and never mined), every
+    transaction already sent with a nonce above n sits in the node's queue
+    and cannot be mined until n is used. The policy is:
+
+    1. *Never retry the failed voucher.* Its row records the failure status.
+    2. *Resync immediately.* The counter is re-read from the node's pending
+       nonce, which stops at the first gap, so the *next* voucher fills n and
+       the queued ones behind it become minable. Nonces still held by
+       in-flight transactions are skipped, so a resync can never hand out a
+       nonce that another thread is already using.
+    3. *Record it.* Every resync is counted (`resyncs`, carried on each row
+       as `nonceResyncs`) and logged in `events`; every nonce that was in
+       flight above the failed one at the time is marked, and its row carries
+       `gapBehind = n`. Those rows' latencies include waiting for the gap to
+       be filled and must be reported separately, not silently pooled.
+
+    A resync can be wrong on a load-balanced public RPC whose nodes disagree
+    about the pending nonce; that shows up as `nonce_too_low` on the next
+    voucher, which triggers another (recorded) resync rather than a retry.
+    """
+
+    MAX_EVENTS = 200
+
+    def __init__(self, fetch_pending: Any) -> None:
+        self._fetch = fetch_pending
+        self._lock = threading.Lock()
+        self._next = int(fetch_pending())
+        self.initial = self._next
+        self.epoch = 0
+        self.resyncs = 0
+        self.allocated = 0
+        self._held: set[int] = set()
+        self._inflight = 0
+        self._affected: dict[int, int] = {}
+        self.events: list[dict[str, Any]] = []
+
+    def allocate(self) -> tuple[int, int]:
+        """Next free nonce and the epoch it was allocated in."""
+        with self._lock:
+            while self._next in self._held:
+                self._next += 1
+            nonce = self._next
+            self._next += 1
+            self._held.add(nonce)
+            self.allocated += 1
+            return nonce, self.epoch
+
+    def broadcast(self) -> int:
+        """Count a transaction as in flight; returns how many are now."""
+        with self._lock:
+            self._inflight += 1
+            return self._inflight
+
+    def landed(self) -> None:
+        """A broadcast transaction is no longer awaited (receipt or timeout)."""
+        with self._lock:
+            self._inflight = max(0, self._inflight - 1)
+
+    def fail(self, nonce: int, failure: str) -> None:
+        """Nonce `nonce` was not (or may not have been) used: resync, record."""
+        with self._lock:
+            # A nonce the node says is taken leaves no gap behind it; any other
+            # failure may have left `nonce` unused, stalling everything above.
+            occupied = failure in NONCE_OCCUPIED
+            behind = [] if occupied else sorted(n for n in self._held if n > nonce)
+            for n in behind:
+                self._affected.setdefault(n, nonce)
+            self._held.discard(nonce)
+            before = self._next
+            error: str | None = None
+            try:
+                self._next = int(self._fetch())
+            except Exception as exc:  # noqa: BLE001 - keep the counter, record why
+                error = str(exc)
+                self._next = min(before, nonce)
+            self.epoch += 1
+            self.resyncs += 1
+            event = {
+                "time": time.time(),
+                "failure": failure,
+                "nonce": nonce,
+                "counterBefore": before,
+                "counterAfter": self._next,
+                "nonceOccupied": occupied,
+                "inFlightBehind": behind,
+                "resyncError": error,
+            }
+            self.events.append(event)
+            del self.events[: -self.MAX_EVENTS]
+        log.warning("nonce resync after %s on nonce %d: %s", failure, nonce, event)
+
+    def release(self, nonce: int) -> int | None:
+        """Drop `nonce` from the held set; return the gap it sat behind, if any."""
+        with self._lock:
+            self._held.discard(nonce)
+            return self._affected.pop(nonce, None)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "initial": self.initial,
+                "next": self._next,
+                "allocated": self.allocated,
+                "held": sorted(self._held),
+                "inflight": self._inflight,
+                "epoch": self.epoch,
+                "resyncs": self.resyncs,
+                "events": list(self.events[-20:]),
+            }
+
+
+class PipelinedResult(RelayResult):
+    """`RelayResult` plus the fields only pipelining mode produces.
+
+    A subclass, returned only when `GATEWAY_PIPELINE` is on, so the default
+    response shape stays exactly what it was.
+    """
+
+    failure: str | None = None
+    """One of the FAIL_* statuses, or None for a clean settlement."""
+    txNonce: int | None = None
+    """Gateway account nonce this voucher's transaction used."""
+    nonceEpoch: int | None = None
+    """Resync epoch the nonce was allocated in (0 until the first resync)."""
+    inflight: int | None = None
+    """Transactions in flight (incl. this one) right after this broadcast."""
+    gapBehind: int | None = None
+    """Set when a lower nonce failed while this one was in flight: that nonce."""
+    nonceResyncs: int | None = None
+    """Total nonce resyncs this gateway process had done when this row closed."""
