@@ -1060,3 +1060,32 @@ Ethereum Sepolia gateway **49,966,419,633,186,568 wei** (30 settles: 2.65e12 wei
 
 ### Budget after
 Load key **407,761,798,615,875 wei** (spent 9.22e13 incl. 1.1e13 deposits; plan A estimate 1.11e14).
+
+## Session v2-4 — K = 8 rerun on publicnode after the nonce fix (Base Sepolia, 2026-10-16)
+- Commit **548892d** both machines (the `_submit_pipelined` fix: a receipt-lookup error no longer releases a
+  broadcast tx's nonce; regression test in `gateway/test_pipeline.py`). Same 8 Pi devices, keys and channels
+  as v2-3 (`LOAD_CHANNEL_1..8`, no new channels), same load key `0x9039…b78f`, `GATEWAY_PIPELINE=1`, WiFi,
+  controlled, no gap. **RPC: publicnode** (`base-sepolia-rpc.publicnode.com`), chosen because the v2-3 K = 8
+  failures were the Alchemy free-tier rate limit. n = 8 per device (64 attempts): what the remaining channel
+  deposits cover without topping up.
+- Checks before start: Pi rebooted (power), governor set back to `performance`, WiFi powersave `disable`,
+  Pi chrony 0.1 µs; laptop `w32tm /resync` (admin), stripchart vs time.cloudflare.com +1…+9 ms.
+- Data: `cc_base-sepolia_k8_20261016T083643Z-630a7c.csv`, blocks 48185772–48185779.
+- `concurrency.py analyze` now groups **per session** and reports `rpcHost`; before, the two K = 8 sessions
+  (a day apart) pooled into one meaningless throughput span. K = 1/2/4 and the v2-3 K = 8 row reproduce
+  unchanged. results-v1 `summary.csv`/`tests.csv` re-checked identical.
+
+### Results (mean ± 95% CI, n)
+| K = 8 | ok / attempted | settled/s | settles per block (max) | latency `t4 − t0` | to sealed block |
+|---|---|---|---|---|---|
+| v2-3, Alchemy free tier | 51 / 80 | 3.86 | 7.29 (8) | 872.8 ± 71.7 (51) | 2024.1 ± 78.9 |
+| **v2-4, publicnode** | **64 / 64** | **4.11** | **8.00 (8)** | 941.0 ± 76.6 (64) | 1995.4 ± 63.5 |
+
+- **0 failures, 0 nonce resyncs, exactly 8 settlements in every one of 8 consecutive blocks.** Throughput
+  keeps scaling linearly at K = 8 (K settles per 2 s block for K = 1, 2, 4, 8). The v2-3 K = 8 failures were
+  the provider's rate limit, confirmed: the same devices, channels and contract succeed 64/64 elsewhere.
+- Latency vs v2-3 K = 8: +68 ms, Welch p = 0.20; sealed −29 ms, p = 0.57. No significant difference, no
+  contradiction (v2-1 showed Alchemy ~120 ms faster at K = 1; here the difference is within noise).
+
+### Budget after
+Load key **378,086,638,595,465 wei** (spent 2.97e13 for 64 settlements).

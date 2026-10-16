@@ -586,14 +586,19 @@ def ci95(x) -> tuple[float, float, int]:
 
 
 def summarise_levels(df):
-    """One row per (chain, transport, pipeline, level): throughput, blocks, latency, failures."""
+    """One row per (chain, transport, pipeline, level, session): throughput, blocks,
+    latency, failures. Sessions are never pooled: a throughput span across two
+    sessions is meaningless, and a rerun may use another RPC provider (`rpcHost`,
+    taken from the rows that reached the chain; failed rows may carry none)."""
     import pandas as pd
 
     rows = []
     df = df.copy()
     df["sealed_ms"] = df["latency_ms"] + (df["t5"] - df["t4"]) * 1000
-    for key, g in df.groupby(["chain", "transport", "deviceHost", "pipeline", "level"]):
+    keys = ["chain", "transport", "deviceHost", "pipeline", "level", "session"]
+    for key, g in df.groupby(keys, sort=True):
         ok = g[g["status"] == "ok"]
+        hosts = g["rpcHost"].dropna().unique() if "rpcHost" in g else []
         clean = ok[ok["gapBehind"].isna()]
         # Device clock (all K processes share one machine's clock): first
         # sensor event of the level to the last settled reply.
@@ -604,8 +609,8 @@ def summarise_levels(df):
         sea, sea_ci, _ = ci95(clean["sealed_ms"])
         statuses = g["status"].value_counts().to_dict()
         rows.append({
-            **dict(zip(["chain", "transport", "deviceHost", "pipeline", "level"], key)),
-            "sessions": g["session"].nunique(),
+            **dict(zip(keys, key)),
+            "rpcHost": ";".join(sorted(map(str, hosts))),
             "attempted": len(g), "ok": len(ok),
             "failed": len(g) - len(ok),
             "statuses": ";".join(f"{s}={c}" for s, c in sorted(statuses.items())),
@@ -629,6 +634,7 @@ def summarise_levels(df):
 def print_levels(s) -> None:
     for _, r in s.iterrows():
         print(f"\n== {r.chain} / {r.transport} / devices on {r.deviceHost} / pipeline={r.pipeline} / K={r.level}"
+              f" / {r.rpcHost} / {r.session}"
               f"   ok {r.ok}/{r.attempted}   [{r.statuses}]")
         print(f"  settled/s {r.settled_per_s:.2f} over {r.span_s:.1f} s; {r.settles_per_block:.2f} settles/block "
               f"over {r.block_span} blocks (max {r.max_settles_in_one_block} in one)")
