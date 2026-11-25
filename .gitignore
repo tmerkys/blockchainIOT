@@ -17,3 +17,6 @@ experiments/device_log/
 
 # Thesis handoff bundle (copied from tracked files; regenerate, do not edit)
 handoff/
+
+# Defence demo runtime state (channels, demo device key, logs)
+demo/.runtime/

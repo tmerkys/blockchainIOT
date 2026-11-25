@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="lt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IoT mikromokėjimai · Base L2</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1>IoT mikromokėjimai</h1>
+    <p class="facts" id="facts">&nbsp;</p>
+  </div>
+  <div class="mode">
+    <span id="badge" class="badge">…</span>
+    <select id="modeSelect" aria-label="Režimas">
+      <option value="pi">Raspberry Pi</option>
+      <option value="laptop">Kompiuteris</option>
+    </select>
+  </div>
+</header>
+<div id="banner" class="banner hidden" role="alert"><span id="bannerText"></span><button id="btnRetry" hidden>Bandyti dar kartą</button></div>
+<div id="sr" class="sr-only" aria-live="polite"></div>
+
+<nav class="tabs" role="tablist" aria-label="Demonstracijos dalys">
+  <button role="tab" id="t-pay" data-tab="pay" aria-controls="tab-pay" aria-selected="true" class="active">1 · Mokėjimas</button>
+  <button role="tab" id="t-channel" data-tab="channel" aria-controls="tab-channel" aria-selected="false" tabindex="-1">2 · 200 mokėjimų</button>
+  <button role="tab" id="t-attack" data-tab="attack" aria-controls="tab-attack" aria-selected="false" tabindex="-1">3 · Ataka</button>
+</nav>
+
+<main>
+  <!-- 1 -->
+  <section class="panel active" id="tab-pay" role="tabpanel" aria-labelledby="t-pay">
+    <div class="head">
+      <p>Įrenginys pasirašo, gateway sumoka gas, Base įrašo.</p>
+      <button class="primary" id="btnPay">⚡ Mokėti</button>
+    </div>
+
+    <ol class="pipeline" id="pipeline">
+      <li data-step="tick"><span class="ico" aria-hidden="true">⚡</span><b>Skaitiklis</b><em></em></li>
+      <li data-step="signed"><span class="ico" aria-hidden="true">✍</span><b>Parašas</b><em></em></li>
+      <li data-step="gateway"><span class="ico" aria-hidden="true">📡</span><b>Gateway</b><em></em></li>
+      <li data-step="broadcast"><span class="ico" aria-hidden="true">⛓</span><b>Transakcija</b><em></em></li>
+      <li data-step="settled"><span class="ico" aria-hidden="true">✓</span><b>Blokas</b><em></em></li>
+    </ol>
+
+    <div class="result">
+      <div class="total"><strong id="latTotal">–</strong><small>nuo įvykio iki bloko</small></div>
+      <div class="barwrap">
+        <div class="bar" id="latBar"></div>
+        <div class="legend" id="latLegend"></div>
+      </div>
+    </div>
+    <p class="moneyline" id="payMoney"></p>
+    <p class="strip" id="payFacts"></p>
+    <p class="ref" id="latRef"></p>
+  </section>
+
+  <!-- 2 -->
+  <section class="panel" id="tab-channel" role="tabpanel" aria-labelledby="t-channel">
+    <div class="head">
+      <p id="chLine">Kanalas…</p>
+      <div class="btns">
+        <button id="btnOpen"><span id="btnOpenLabel">Naujas kanalas</span> <small id="btnOpenCost"></small></button>
+        <button class="primary" id="btnChannel">⚡ 200 mokėjimų</button>
+      </div>
+    </div>
+
+    <div class="counters">
+      <div class="counter"><span id="cSigned">0</span><b>parašai</b><small>off-chain</small></div>
+      <div class="counter tx"><span id="cTx">0</span><b>transakcijos</b><small>on-chain</small></div>
+    </div>
+    <div class="progress" role="progressbar" aria-label="Pasirašyti čekiai" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="chProgress"></div></div>
+    <p class="error" id="chError"></p>
+
+    <div class="hidden" id="chResult">
+      <p class="big" id="chBig" aria-hidden="true"></p>
+      <div class="cmp">
+        <span>Be kanalo</span><div class="track"><div class="fill a" style="width:100%"></div></div><small id="cmpA"></small>
+        <span>Su kanalu</span><div class="track"><div class="fill b" id="cmpBarB"></div></div><small id="cmpB"></small>
+      </div>
+      <p class="strip" id="chFacts"></p>
+      <div class="money hidden" id="chMoney" aria-label="Kas kam sumokėjo"></div>
+    </div>
+  </section>
+
+  <!-- 3 -->
+  <section class="panel" id="tab-attack" role="tabpanel" aria-labelledby="t-attack">
+    <div class="head">
+      <p>Gateway bando pasiimti pusę užstato <b>be įrenginio parašo</b>.</p>
+      <button class="danger" id="btnAttack">Pradėti ataką</button>
+    </div>
+
+    <ol class="steps" id="atkSteps">
+      <li data-k="start"><i aria-hidden="true">⚔</i><b>Gateway pasirašo įrenginio vietoje</b><span></span></li>
+      <li data-k="api"><i aria-hidden="true">🛡</i><b>A · Per gateway API</b><span></span></li>
+      <li data-k="forced"><i aria-hidden="true">⚔</i><b>B · Apeina API, siunčia tiesiai</b><span></span></li>
+      <li data-k="mined"><i aria-hidden="true">🛡</i><b>Kontraktas</b><span></span></li>
+    </ol>
+
+    <div class="hidden" id="atkOut">
+      <div class="balances" id="atkBalances"></div>
+      <div class="verdict" id="atkVerdict" role="status"></div>
+    </div>
+  </section>
+</main>
+
+<section class="log" aria-label="Terminal">
+  <div class="log-head"><span id="logTitle">device &amp; gateway log</span><button class="link" id="btnLogToggle" aria-controls="log" aria-expanded="true">hide</button></div>
+  <pre id="log" tabindex="0"></pre>
+</section>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

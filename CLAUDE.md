@@ -29,7 +29,8 @@ Four layers, matching §3.2 of the thesis:
 - **H3** — regulatory (MiCA/PSD2). Analytical, no code. Ignore here.
 
 If a feature doesn't serve H1 or H2, it's out of scope. No web UI, no dashboard, no token
-economics. Resist scope creep — the deliverable is measurements, not a product.
+economics. (Exception: `demo/` is a presentation aid for the defence, outside the
+measurement scope; it only calls the measured code and never changes it. See docs/demo-plan.md.) Resist scope creep — the deliverable is measurements, not a product.
 
 ## Stack
 
