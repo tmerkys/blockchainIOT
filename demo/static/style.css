@@ -21,7 +21,7 @@
 body {
   margin: 0; background: var(--bg); color: var(--ink); line-height: 1.35;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  padding-bottom: 210px;
+  padding-bottom: calc(var(--log-h, 160px) + 50px);
 }
 pre, .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
 a { color: var(--accent); text-decoration: none; }
@@ -124,7 +124,7 @@ main { padding: 0 40px; }
 /* log */
 .log { position: fixed; left: 0; right: 0; bottom: 0; background: #11151b; color: #d5dbe3; z-index: 5; }
 .log-head { display: flex; justify-content: space-between; padding: 6px 40px; font-size: .8rem; color: #8994a3; }
-.log pre { margin: 0; padding: 0 40px 10px; height: 160px; overflow: auto; font-size: .8rem; }
+.log pre { margin: 0; padding: 0 40px 10px; height: var(--log-h, 160px); overflow: auto; font-size: .8rem; }
 .log.collapsed pre { display: none; }
 .log .pi { color: #7ee0a5; }
 .log .gw { color: #ffb86b; }
@@ -175,3 +175,12 @@ main { padding: 0 40px; }
 .moneyline b { color: #0b6b38; }
 .moneyline .arrow { color: #0b6b38; font-weight: 700; margin: 0 4px; }
 .moneyline .sep, .strip .sep { margin: 0 10px; color: var(--line); }
+
+/* terminal resize handle: drag, arrow keys, double-click resets */
+.log-grip { position: absolute; top: -6px; left: 0; right: 0; height: 12px; cursor: ns-resize; touch-action: none; display: flex; justify-content: center; align-items: center; }
+.log-grip::after { content: ""; width: 48px; height: 4px; border-radius: 2px; background: #3a4350; transition: background .15s; }
+.log-grip:hover::after, .log-grip:focus-visible::after, .log.resizing .log-grip::after { background: #8fb4ff; }
+.log-grip:focus-visible { outline: none; }
+.log.resizing { user-select: none; }
+.log.collapsed .log-grip { display: none; }
+body:has(.log.collapsed) { padding-bottom: 50px; }

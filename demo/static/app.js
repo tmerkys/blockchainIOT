@@ -93,6 +93,57 @@ $("#btnLogToggle").addEventListener("click", (e) => {
   e.currentTarget.setAttribute("aria-expanded", !collapsed);
 });
 
+// Terminal height: drag the grip, use ↑/↓ on it, double-click to reset. Remembered per browser.
+const LOG_MIN = 60, LOG_DEFAULT = 160;
+const logMax = () => Math.round(window.innerHeight * 0.7);
+function setLogHeight(px, save = true) {
+  const h = Math.max(LOG_MIN, Math.min(logMax(), Math.round(px)));
+  document.documentElement.style.setProperty("--log-h", `${h}px`);
+  const grip = $("#logGrip");
+  grip.setAttribute("aria-valuenow", h);
+  grip.setAttribute("aria-valuemin", LOG_MIN);
+  grip.setAttribute("aria-valuemax", logMax());
+  if (save) try { localStorage.setItem("logHeight", h); } catch { /* private mode */ }
+  return h;
+}
+function logHeight() { return logEl.getBoundingClientRect().height; }
+(() => {
+  const grip = $("#logGrip"), sec = $(".log");
+  let saved = null;
+  try { saved = Number(localStorage.getItem("logHeight")) || null; } catch { /* private mode */ }
+  setLogHeight(saved || LOG_DEFAULT, false);
+
+  let startY = 0, startH = 0, dragging = false;
+  const end = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    sec.classList.remove("resizing");
+    if (e?.pointerId != null && grip.hasPointerCapture(e.pointerId)) grip.releasePointerCapture(e.pointerId);
+    setLogHeight(logHeight());
+  };
+  grip.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || dragging) return;   // primary button / first finger only
+    dragging = true;
+    startY = e.clientY; startH = logHeight();
+    grip.setPointerCapture(e.pointerId);
+    sec.classList.add("resizing");
+    e.preventDefault();
+  });
+  grip.addEventListener("pointermove", (e) => {
+    if (dragging) setLogHeight(startH + (startY - e.clientY), false);
+  });
+  ["pointerup", "pointercancel", "lostpointercapture"].forEach((t) => grip.addEventListener(t, end));
+  window.addEventListener("blur", () => end());
+  grip.addEventListener("dblclick", () => setLogHeight(LOG_DEFAULT));
+  grip.addEventListener("keydown", (e) => {
+    const step = { ArrowUp: 20, ArrowDown: -20, PageUp: 100, PageDown: -100 }[e.key];
+    if (step) { e.preventDefault(); setLogHeight(logHeight() + step); }
+    if (e.key === "Home") { e.preventDefault(); setLogHeight(LOG_MIN); }
+    if (e.key === "End") { e.preventDefault(); setLogHeight(logMax()); }
+  });
+  window.addEventListener("resize", () => setLogHeight(logHeight(), false));
+})();
+
 const SAY = {
   tick: (e) => `meter tick${e.kwh ? `: ${numEn(e.kwh, 4)} kWh` : ""}`,
   signed: (e) => `voucher signed: nonce ${e.nonce}, cumulative ${gweiEn(e.amount)}, ${numEn(e.signing_ms, 1)} ms`,
